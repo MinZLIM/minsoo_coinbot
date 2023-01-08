@@ -1,4 +1,4 @@
-[https://github.com/MinZLIM/minsoo_coinbot/blob/main/img/ko.png](https://github.com/gofiber/fiber/blob/master/.github/README_ko.md)
+<img src="{{ "/blob/main/img/ko.png"}}>(https://github.com/gofiber/fiber/blob/master/.github/README_ko.md)
 
 # What?
 
