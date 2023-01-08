@@ -1,4 +1,4 @@
-[<img src="https://github.com/MinZLIM/minsoo_coinbot/blob/main/img/ko.png">](https://github.com/gofiber/fiber/blob/master/.github/README_ko.md)
+[<img src="https://github.com/MinZLIM/minsoo_coinbot/blob/main/img/ko.png">](https://github.com/MinZLIM/minsoo_coinbot/tree/main/readme)
 
 # What?
 
