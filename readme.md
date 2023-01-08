@@ -1,4 +1,4 @@
-[ko]<a href="https://github.com/gofiber/fiber/blob/master/.github/README_ko.md">
+[ko](https://github.com/gofiber/fiber/blob/master/.github/README_ko.md)
 
 # What?
 
