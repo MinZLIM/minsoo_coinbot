@@ -2,24 +2,51 @@ import ccxt
 import pandas as pd
 import numpy as np
 from flask import Flask, jsonify, render_template_string
-from prophet import Prophet
-from keras.models import Sequential
-from keras.layers import LSTM, Dense, Input
-from sklearn.preprocessing import MinMaxScaler
-import threading
-import time
 from fucntion import ccxt_function
 from urllib.parse import unquote, quote
-
+import threading
+import time
 
 app = Flask(__name__)
 
 # Global cache for pre-analyzed coin data
 coin_data_cache = {}
+transaction_log = []  # Store transactions
+virtual_balance = 100.0  # Initial virtual balance
 
+def execute_trade(symbol, market_flow, entry_price):
+    global virtual_balance, transaction_log
+    quantity = 1  # Fixed quantity for simplicity
+
+    if market_flow == "long":
+        # Buy action
+        cost = entry_price * quantity
+        if virtual_balance >= cost:
+            virtual_balance -= cost
+            transaction_log.append({
+                "symbol": symbol,
+                "action": "buy",
+                "price": entry_price,
+                "quantity": quantity,
+                "balance": virtual_balance
+            })
+    elif market_flow == "short":
+        # Short action (hypothetical logic for selling first)
+        gain = entry_price * quantity
+        virtual_balance += gain
+        transaction_log.append({
+            "symbol": symbol,
+            "action": "short",
+            "price": entry_price,
+            "quantity": quantity,
+            "balance": virtual_balance
+        })
 
 # Pre-analyze coin data
 def pre_analyze_coins():
+    """
+    Continuously fetch and analyze top coins and execute trades.
+    """
     global coin_data_cache
     exchange = ccxt.binanceusdm()
     while True:
@@ -27,35 +54,13 @@ def pre_analyze_coins():
             top_coins = ccxt_function.get_top_30_coins()
             for symbol in top_coins:
                 try:
-                    data = ccxt_function.fetch_data(f"{symbol}", exchange, timeframe="3m")
+                    analysis = ccxt_function.analyze_coin(symbol, exchange)
+                    coin_data_cache[symbol] = analysis
 
-                    # LSTM Flow Prediction
-                    X, y, scaler = ccxt_function.prepare_lstm_data(data)
-                    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-                    lstm_model = ccxt_function.train_lstm_model(X, y)
-                    predicted = lstm_model.predict(X)
-                    predicted_prices = scaler.inverse_transform(predicted)
+                    # Execute trade based on analysis
+                    if analysis["market_flow"] in ["long", "short"]:
+                        execute_trade(symbol, analysis["market_flow"], analysis["entry_price"])
 
-                    # Prophet Flow Prediction
-                    prophet_model = ccxt_function.train_prophet_model(data)
-                    future = prophet_model.make_future_dataframe(periods=24, freq='H')
-                    forecast = prophet_model.predict(future)
-
-                    # Bollinger Bands for Stop Loss and Target Prices
-                    data = ccxt_function.calculate_bollinger_bands(data)
-                    last_row = data.iloc[-1]
-                    target_price, stop_loss = ccxt_function.update_target_price(last_row['close'], last_row['upper_band'], last_row['lower_band'])
-
-                    # Market flow analysis for Long/Short signal
-                    market_flow = ccxt_function.analyze_market_flow(data)
-
-                    # Cache the analysis with flow signal
-                    coin_data_cache[symbol] = {
-                        "entry_price": last_row['close'],
-                        "target_price": target_price,
-                        "stop_loss": stop_loss,
-                        "market_flow": market_flow
-                    }
                 except Exception as e:
                     coin_data_cache[symbol] = {"error": str(e)}
             time.sleep(3600)  # Update every hour
@@ -103,7 +108,17 @@ def get_coin_data(symbol):
             return jsonify({"error": f"Coin data for {symbol} not found."}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-        
+
+@app.route("/transactions", methods=['GET'])
+def get_transactions():
+    try:
+        return jsonify({
+            "virtual_balance": virtual_balance,
+            "transaction_log": transaction_log
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
     # Start pre-analysis in a separate thread
     analysis_thread = threading.Thread(target=pre_analyze_coins, daemon=True)

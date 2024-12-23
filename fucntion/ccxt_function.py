@@ -21,11 +21,12 @@ def get_top_30_coins():
     top_30 = sorted(trading_volume, key=trading_volume.get, reverse=True)[:30]
     return top_30
 
-def fetch_data(symbol, exchange):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=500)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+def fetch_data(symbol, exchange, timeframe="3m"):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=500)
+    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     return df
+
 
 # Step 2: LSTM-based flow prediction
 def prepare_lstm_data(data, look_back=60):
@@ -91,3 +92,38 @@ def analyze_market_flow(data):
         return "short"  # Downward trend
     else:
         return "neutral"
+
+
+# Utility Functions
+def analyze_coin(symbol, exchange, timeframe="3m"):
+    """
+    Analyzes a single coin to generate trading signals.
+    """
+    data = fetch_data(symbol, exchange, timeframe=timeframe)
+
+    # LSTM Flow Prediction
+    X, y, scaler = prepare_lstm_data(data)
+    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
+    lstm_model = train_lstm_model(X, y)
+    predicted = lstm_model.predict(X)
+    predicted_prices = scaler.inverse_transform(predicted)
+
+    # Prophet Flow Prediction
+    prophet_model = train_prophet_model(data)
+    future = prophet_model.make_future_dataframe(periods=24, freq='H')
+    forecast = prophet_model.predict(future)
+
+    # Bollinger Bands for Stop Loss and Target Prices
+    data = calculate_bollinger_bands(data)
+    last_row = data.iloc[-1]
+    target_price, stop_loss = update_target_price(last_row['close'], last_row['upper_band'], last_row['lower_band'])
+
+    # Market flow analysis for Long/Short signal
+    market_flow = analyze_market_flow(data)
+
+    return {
+        "entry_price": last_row['close'],
+        "target_price": target_price,
+        "stop_loss": stop_loss,
+        "market_flow": market_flow
+    }
