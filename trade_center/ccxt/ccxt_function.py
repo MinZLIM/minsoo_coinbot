@@ -7,18 +7,18 @@ from keras.models import Sequential
 from keras.layers import LSTM, Dense, Input
 from sklearn.preprocessing import MinMaxScaler
 import time
-import talib
+import pandas_ta as ta
 
 # Step 1: Collect top 5 coins by trading volume using Binance Futures
-def get_top_5_coins():
+def get_top_30_coins():
     exchange = ccxt.binanceusdm()  # Binance Futures API
     tickers = exchange.fetch_tickers()
     trading_volume = {
         symbol: tickers[symbol]['quoteVolume']
         for symbol in tickers if symbol.endswith('USDT')
     }
-    top_5 = sorted(trading_volume, key=trading_volume.get, reverse=True)[:5]
-    return top_5
+    top_30 = sorted(trading_volume, key=trading_volume.get, reverse=True)[:30]
+    return top_30
 
 def fetch_data(symbol, exchange, timeframe="5m"):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=500)
@@ -100,35 +100,28 @@ def prophet_analyze_coin(symbol, exchange, timeframe="1H"):
     forecast = prophet_model.predict(future)
     print(f"Forecast Data: {forecast[['ds', 'yhat']].tail(5)}")  # Print last 5 forecasts
 
-def calculate_indicators(df, bollinger_period=20, bollinger_std_dev=2, rsi_period=14, stochastic_k_period=14, stochastic_d_period=3, adx_period=14):
+def calculate_indicators(symbol, exchange, bollinger_period=20, bollinger_std_dev=2, rsi_period=14, stochastic_k_period=14, stochastic_d_period=3, adx_period=14):
     """
     Calculate Bollinger Bands, RSI, Stochastic, and ADX indicators.
     """
+
+    df = fetch_data(symbol, exchange)
     # Bollinger Bands
-    df['upper_band'], df['middle_band'], df['lower_band'] = talib.BBANDS(
-        df['close'],
-        timeperiod=bollinger_period,
-        nbdevup=bollinger_std_dev,
-        nbdevdn=bollinger_std_dev,
-        matype=0
-    )
+    bb = ta.bbands(df['close'], length=bollinger_period, std=bollinger_std_dev)
+    df['upper_band'] = bb['BBU_20_2.0']
+    df['middle_band'] = bb['BBM_20_2.0']
+    df['lower_band'] = bb['BBL_20_2.0']
 
     # RSI
-    df['rsi'] = talib.RSI(df['close'], timeperiod=rsi_period)
+    df['rsi'] = ta.rsi(df['close'], length=rsi_period)
 
     # Stochastic Oscillator
-    df['slowk'], df['slowd'] = talib.STOCH(
-        df['high'],
-        df['low'],
-        df['close'],
-        fastk_period=stochastic_k_period,
-        slowk_period=stochastic_d_period,
-        slowk_matype=0,
-        slowd_period=stochastic_d_period,
-        slowd_matype=0
-    )
+    stoch = ta.stoch(df['high'], df['low'], df['close'], k=stochastic_k_period, d=stochastic_d_period)
+    df['slowk'] = stoch['STOCHk_14_3_3']
+    df['slowd'] = stoch['STOCHd_14_3_3']
 
     # ADX
-    df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=adx_period)
+    adx = ta.adx(df['high'], df['low'], df['close'], length=adx_period)
+    df['adx'] = adx['ADX_14']
 
     return df
