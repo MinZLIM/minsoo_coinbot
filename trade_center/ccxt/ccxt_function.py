@@ -7,6 +7,7 @@ from keras.models import Sequential
 from keras.layers import LSTM, Dense, Input
 from sklearn.preprocessing import MinMaxScaler
 import time
+import talib
 
 # Step 1: Collect top 5 coins by trading volume using Binance Futures
 def get_top_5_coins():
@@ -98,3 +99,36 @@ def prophet_analyze_coin(symbol, exchange, timeframe="1H"):
     future = prophet_model.make_future_dataframe(periods=24, freq='H')
     forecast = prophet_model.predict(future)
     print(f"Forecast Data: {forecast[['ds', 'yhat']].tail(5)}")  # Print last 5 forecasts
+
+def calculate_indicators(df, bollinger_period=20, bollinger_std_dev=2, rsi_period=14, stochastic_k_period=14, stochastic_d_period=3, adx_period=14):
+    """
+    Calculate Bollinger Bands, RSI, Stochastic, and ADX indicators.
+    """
+    # Bollinger Bands
+    df['upper_band'], df['middle_band'], df['lower_band'] = talib.BBANDS(
+        df['close'],
+        timeperiod=bollinger_period,
+        nbdevup=bollinger_std_dev,
+        nbdevdn=bollinger_std_dev,
+        matype=0
+    )
+
+    # RSI
+    df['rsi'] = talib.RSI(df['close'], timeperiod=rsi_period)
+
+    # Stochastic Oscillator
+    df['slowk'], df['slowd'] = talib.STOCH(
+        df['high'],
+        df['low'],
+        df['close'],
+        fastk_period=stochastic_k_period,
+        slowk_period=stochastic_d_period,
+        slowk_matype=0,
+        slowd_period=stochastic_d_period,
+        slowd_matype=0
+    )
+
+    # ADX
+    df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=adx_period)
+
+    return df
