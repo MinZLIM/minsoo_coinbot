@@ -87,7 +87,7 @@ def execute_trade(symbol, action, position_size, entry_price, target_price, stop
         "stop_loss_price": stop_loss_price
     })
 
-def check_positions(log_file):
+def check_positions(log_file,exchange):
     """
     Check open positions and update the virtual account if targets or stop losses are hit.
     """
@@ -159,7 +159,7 @@ def analyze_and_record():
                         execute_trade(symbol, action, position_size, entry_price, target_price, stop_loss_price, log_file)
 
                     # Check open positions for closures
-                    check_positions(log_file)
+                    check_positions(log_file,exchange)
 
                 except Exception as e:
                     print(f"Error analyzing symbol {symbol}: {e}")
