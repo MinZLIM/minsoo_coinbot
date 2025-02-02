@@ -8,44 +8,15 @@ import ccxt_function
 
 virt_account = 1000000.0
 open_positions = []
+account_file = "./trade_log/virtual_account.txt"
 
-def calculate_position_size(account_balance, risk_percentage):
-    """
-    Calculate position size based on account balance and risk percentage.
-    """
-    return account_balance * (risk_percentage / 100)
-
-def calculate_targets(entry_price, risk_reward_ratio, stop_loss_percentage, action):
-    """
-    Calculate target price and stop loss price based on action (long or short).
-    """
-    if action == "long":
-        stop_loss = entry_price * (1 - stop_loss_percentage / 100)
-        target = entry_price + (entry_price - stop_loss) * risk_reward_ratio
-    elif action == "short":
-        stop_loss = entry_price * (1 + stop_loss_percentage / 100)
-        target = entry_price - (stop_loss - entry_price) * risk_reward_ratio
-    else:
-        raise ValueError("Invalid action. Must be 'long' or 'short'.")
-
-    return target, stop_loss
-
-def decide_trade_action(indicators):
-    """
-    Decide whether to take a long, short, or no position based on indicators.
-    """
-    rsi = indicators['rsi'].iloc[-1]
-    upper_band = indicators['upper_band'].iloc[-1]
-    lower_band = indicators['lower_band'].iloc[-1]
-    close_price = indicators['close'].iloc[-1]
-    adx = indicators['adx'].iloc[-1]
-
-    if rsi < 30 and close_price < lower_band and adx > 25:
-        return "long"
-    elif rsi > 70 and close_price > upper_band and adx > 25:
-        return "short"
-    else:
-        return "none"
+def update_account_file():
+    """Update the account file with current balance and open positions."""
+    with open(account_file, "w") as file:
+        file.write(f"Balance: {virt_account:.2f}\n")
+        file.write("Open Positions:\n")
+        for pos in open_positions:
+            file.write(f"{pos}\n")
 
 def execute_trade(symbol, action, position_size, entry_price, target_price, stop_loss_price, log_file):
     """
@@ -84,10 +55,12 @@ def execute_trade(symbol, action, position_size, entry_price, target_price, stop
         "size": position_size,
         "entry_price": entry_price,
         "target_price": target_price,
-        "stop_loss_price": stop_loss_price
+        "stop_loss_price": stop_loss_price,
+        "log_file": log_file  # Store log file for proper logging
     })
+    update_account_file()
 
-def check_positions(log_file,exchange):
+def check_positions(exchange):
     """
     Check open positions and update the virtual account if targets or stop losses are hit.
     """
@@ -100,6 +73,7 @@ def check_positions(log_file,exchange):
         entry_price = position['entry_price']
         target_price = position['target_price']
         stop_loss_price = position['stop_loss_price']
+        log_file = position['log_file']
 
         # Fetch the latest price for the symbol
         try:
@@ -132,6 +106,7 @@ def check_positions(log_file,exchange):
 
         # Remove the closed position
         open_positions.remove(position)
+        update_account_file()
 
 def analyze_and_record():
     try:
@@ -146,20 +121,20 @@ def analyze_and_record():
                 try:
                     # Fetch 5-minute interval data and calculate indicators
                     indicators = ccxt_function.calculate_indicators(symbol, exchange)
-                    action = decide_trade_action(indicators)
+                    action = ccxt_function.decide_trade_action(indicators)
                     log_file = f"./trade_log/{symbol.replace('/', '_')}_log.txt"
 
                     if action != "none":
-                        position_size = calculate_position_size(virt_account, risk_percentage=10)  # 10% risk
+                        position_size = ccxt_function.calculate_position_size(virt_account, risk_percentage=10)  # 10% risk
                         entry_price = indicators['close'].iloc[-1]
-                        target_price, stop_loss_price = calculate_targets(
+                        target_price, stop_loss_price = ccxt_function.calculate_targets(
                             entry_price, risk_reward_ratio=2, stop_loss_percentage=1, action=action
                         )
 
                         execute_trade(symbol, action, position_size, entry_price, target_price, stop_loss_price, log_file)
 
                     # Check open positions for closures
-                    check_positions(log_file,exchange)
+                    check_positions(exchange)
 
                 except Exception as e:
                     print(f"Error analyzing symbol {symbol}: {e}")

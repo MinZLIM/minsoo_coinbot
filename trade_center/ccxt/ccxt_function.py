@@ -125,3 +125,42 @@ def calculate_indicators(symbol, exchange, bollinger_period=20, bollinger_std_de
     df['adx'] = adx['ADX_14']
 
     return df
+
+def calculate_position_size(account_balance, risk_percentage):
+    """
+    Calculate position size based on account balance and risk percentage.
+    """
+    return account_balance * (risk_percentage / 100)
+
+def calculate_targets(entry_price, risk_reward_ratio, stop_loss_percentage, action):
+    """
+    Calculate target price and stop loss price based on action (long or short).
+    """
+    if action == "long":
+        stop_loss = entry_price * (1 - stop_loss_percentage / 100)
+        target = entry_price + (entry_price - stop_loss) * risk_reward_ratio
+    elif action == "short":
+        stop_loss = entry_price * (1 + stop_loss_percentage / 100)
+        target = entry_price - (stop_loss - entry_price) * risk_reward_ratio
+    else:
+        raise ValueError("Invalid action. Must be 'long' or 'short'.")
+
+    return target, stop_loss
+
+def decide_trade_action(indicators):
+    """
+    Decide whether to take a long, short, or no position based on indicators.
+    """
+    rsi = indicators['rsi'].iloc[-1]
+    upper_band = indicators['upper_band'].iloc[-1]
+    lower_band = indicators['lower_band'].iloc[-1]
+    close_price = indicators['close'].iloc[-1]
+    adx = indicators['adx'].iloc[-1]
+
+    if rsi < 30 and close_price < lower_band and adx > 25:
+        return "long"
+    elif rsi > 70 and close_price > upper_band and adx > 25:
+        return "short"
+    else:
+        return "none"
+    
