@@ -27,6 +27,8 @@ def fetch_data(symbol, exchange, timeframe="5m"):
     df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
     return df
 
+
+
 # Step 2: LSTM-based flow prediction
 def prepare_lstm_data(data, look_back=60):
     scaler = MinMaxScaler(feature_range=(0, 1))
