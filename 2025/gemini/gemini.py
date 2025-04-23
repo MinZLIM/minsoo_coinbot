@@ -8,8 +8,8 @@ from datetime import datetime
 import math
 
 # --- 설정 ---
-API_KEY = "YOUR_TESTNET_API_KEY"    # 테스트넷 API 키 입력
-API_SECRET = "YOUR_TESTNET_SECRET_KEY" # 테스트넷 시크릿 키 입력
+API_KEY = "8ba1c0b2aba42aa05d70c854ea0f507c75cb894dd72e8b4077cc485d689a8f74"    # 테스트넷 API 키 입력
+API_SECRET = "C2GGjvR7nfC099bJwe3MxfUkQKcHIpYQZdyaX5nTyfVQN6lVfUO3qBdGWc0vJHFI" # 테스트넷 시크릿 키 입력
 USE_TESTNET = True                 # 테스트넷 사용
 
 # 전략 파라미터
