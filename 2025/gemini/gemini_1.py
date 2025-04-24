@@ -32,7 +32,7 @@ trade_log_file = 'trade_history.csv'
 trade_logger = logging.getLogger('TradeHistory')
 trade_logger.setLevel(logging.INFO)
 # CSV 파일 핸들러 (trade_logger에만 추가)
-trade_file_handler = logging.FileHandler(trade_log_file, mode='a', encoding='utf-8', newline='')
+trade_file_handler = logging.FileHandler(trade_log_file, mode='a', encoding='utf-8') 
 # CSV 포매터 불필요 (직접 csv.writer 사용)
 trade_logger.addHandler(trade_file_handler)
 
@@ -47,8 +47,8 @@ if not os.path.exists(trade_log_file) or os.path.getsize(trade_log_file) == 0:
 
 # --- 설정 ---
 # ⚠️⚠️⚠️ 실제 바이낸스 API 키 + 읽기 전용(Read-Only) 강력 권장! ⚠️⚠️⚠️
-API_KEY = "YOUR_BINANCE_LIVE_API_KEY"
-API_SECRET = "YOUR_BINANCE_LIVE_SECRET_KEY"
+API_KEY = ""
+API_SECRET = ""
 USE_TESTNET = False # 실제 API 사용
 
 # 전략 파라미터
