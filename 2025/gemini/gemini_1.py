@@ -276,7 +276,7 @@ def check_realtime_entry():
     """짧은 주기 실행: 실시간 가격 확인 및 진입 조건 판단/실행"""
     global virtual_balance, open_positions, blacklist
     # log(f"--- 실시간 진입 체크 시작 ---") # 로그 너무 많으면 주석 처리
-    
+    trade_log_entry = None # 또는 {} 로 초기화
     # --- 메시지 큐 처리 & Whipsaw & 블랙리스트 정리 ---
     positions_closed_in_cycle = []
     while not message_queue.empty():
