@@ -272,10 +272,11 @@ def run_strategy_indicators():
 
 
 def check_realtime_entry():
+    
     """짧은 주기 실행: 실시간 가격 확인 및 진입 조건 판단/실행"""
     global virtual_balance, open_positions, blacklist
     # log(f"--- 실시간 진입 체크 시작 ---") # 로그 너무 많으면 주석 처리
-
+    
     # --- 메시지 큐 처리 & Whipsaw & 블랙리스트 정리 ---
     positions_closed_in_cycle = []
     while not message_queue.empty():
@@ -284,7 +285,6 @@ def check_realtime_entry():
             if message.get('type') == 'close':
                 symbol=message['symbol']; close_price=message['close_price']; reason=message['reason']
                 log(f"메시지 수신: {symbol} 포지션 청산 요청 (사유: {reason}, 가격: {close_price:.4f})")
-                trade_log_entry = {} # 거래 기록용 딕셔너리
                 with positions_lock:
                     if symbol in open_positions:
                         pos_data=open_positions[symbol]['details']
