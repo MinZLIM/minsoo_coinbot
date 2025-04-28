@@ -264,16 +264,20 @@ def log_asset_status():
 # ==============================================================================
 def sync_positions_with_exchange():
     """ 주기적으로 거래소의 실제 포지션/주문과 내부 상태를 동기화합니다. """
-    global real_positions, total_trades
+    global real_positions, total_trades, subscribed_symbols # 구독 중인 심볼 목록 사용
+
     op_logger.info("[SYNC] Starting state synchronization with exchange...")
     if not binance_rest: op_logger.error("[SYNC] CCXT instance not ready."); return
-    orders_to_cancel_sync = []; positions_to_close_untracked_sync = []
-    try:
-        exchange_pos = binance_rest.fetch_positions(); time.sleep(0.5) # API 호출 간격
-        exchange_orders = binance_rest.fetch_open_orders()
 
+    orders_to_cancel_sync = []
+    positions_to_close_untracked_sync = []
+
+    try:
+        # 1. 거래소 실제 포지션 조회 (변경 없음)
+        exchange_pos = binance_rest.fetch_positions()
         current_exchange_pos_dict = {}
         for pos in exchange_pos:
+            # ... (이전 포지션 파싱 로직과 동일) ...
             try:
                 amount = float(pos.get('info', {}).get('positionAmt', 0))
                 if abs(amount) > 1e-9:
@@ -281,15 +285,38 @@ def sync_positions_with_exchange():
                     if symbol_ccxt: symbol_ws = symbol_ccxt.replace('/USDT', 'USDT'); current_exchange_pos_dict[symbol_ws] = {'side': 'long' if amount > 0 else 'short', 'amount': abs(amount), 'entry_price': float(pos.get('entryPrice', 0)), 'symbol_ccxt': symbol_ccxt}
             except Exception as parse_err: op_logger.error(f"[SYNC] Error parsing pos data: {pos.get('info')}, Err: {parse_err}")
 
-        open_sl_tp_order_ids = {o['id'] for o in exchange_orders if o.get('type') in ['STOP_MARKET', 'TAKE_PROFIT_MARKET'] and o.get('status') == 'open'}
+
+        # *** 2. 미체결 주문 조회 방식 변경 (심볼별 조회) ***
+        op_logger.info(f"[SYNC] Fetching open orders for {len(subscribed_symbols)} subscribed symbols...")
+        all_open_orders = []
+        symbols_to_fetch_orders = subscribed_symbols.copy() # 현재 구독/관리 중인 심볼 목록
+        with real_positions_lock: # 현재 보유 포지션 심볼도 포함 (구독 끊겼을 경우 대비)
+            symbols_to_fetch_orders.update(real_positions.keys())
+
+        for symbol_ws in symbols_to_fetch_orders:
+            symbol_ccxt = symbol_ws.replace('USDT','/USDT')
+            try:
+                # 심볼 지정하여 미체결 주문 조회 (Rate Limit 부담 적음)
+                orders = binance_rest.fetch_open_orders(symbol=symbol_ccxt)
+                if orders:
+                    all_open_orders.extend(orders)
+                time.sleep(0.2) # 각 심볼 조회 사이에 약간의 딜레이
+            except RateLimitExceeded as e: op_logger.warning(f"[SYNC] Rate limit fetching orders for {symbol_ccxt}: {e}. Skipping remaining symbols this cycle."); break # 레이트 리밋 시 중단
+            except Exception as e: op_logger.error(f"[SYNC] Error fetching open orders for {symbol_ccxt}: {e}")
+        op_logger.info(f"[SYNC] Fetched total {len(all_open_orders)} open orders for relevant symbols.")
+        # *** 조회 방식 변경 완료 ***
+
+        # 3. 조회된 정보 가공 (all_open_orders 사용)
+        open_sl_tp_order_ids = {o['id'] for o in all_open_orders if o.get('type') in ['STOP_MARKET', 'TAKE_PROFIT_MARKET'] and o.get('status') == 'open'}
         open_orders_by_symbol = {}
-        for o in exchange_orders:
+        for o in all_open_orders:
              if o.get('status') == 'open':
                   symbol_ccxt = o.get('symbol');
                   if symbol_ccxt: symbol_ws = symbol_ccxt.replace('/USDT', 'USDT');
                   if symbol_ws not in open_orders_by_symbol: open_orders_by_symbol[symbol_ws] = []
                   open_orders_by_symbol[symbol_ws].append(o['id'])
 
+        # 4. 로컬 상태와 비교 및 조정 계획 수립 (Lock 사용 필수 - 이전과 동일)
         with real_positions_lock:
             local_pos_symbols = set(real_positions.keys()); exchange_pos_symbols = set(current_exchange_pos_dict.keys())
             symbols_to_remove_local = local_pos_symbols - exchange_pos_symbols
@@ -315,6 +342,7 @@ def sync_positions_with_exchange():
                 for order_id in symbol_open_orders:
                      if order_id not in [sl_id_local, tp_id_local]: op_logger.warning(f"[SYNC] Orphaned order {order_id} for {symbol_ws}? Marking cancel."); orders_to_cancel_sync.append({'symbol_ccxt': symbol_ccxt, 'id': order_id})
 
+        # 5. 동기화 작업 실행 (Lock 해제 후)
         op_logger.info(f"[SYNC] Actions: Close {len(positions_to_close_untracked_sync)}, Cancel {len(orders_to_cancel_sync)}.")
         for pos_data in positions_to_close_untracked_sync:
             symbol_ccxt = pos_data['symbol_ccxt']; op_logger.warning(f"[SYNC] Closing untracked {symbol_ccxt}...")
@@ -325,7 +353,8 @@ def sync_positions_with_exchange():
         unique_orders_to_cancel = {f"{o['symbol_ccxt']}_{o['id']}": o for o in orders_to_cancel_sync}.values()
         for order_info in unique_orders_to_cancel: cancel_order(order_info['symbol_ccxt'], order_info['id']); time.sleep(0.3)
         op_logger.info("[SYNC] State synchronization finished.")
-    except RateLimitExceeded as e: op_logger.warning(f"[SYNC] Rate limit: {e}."); return
+
+    except RateLimitExceeded as e: op_logger.warning(f"[SYNC] Rate limit during sync: {e}."); return
     except (ExchangeNotAvailable, OnMaintenance) as e: op_logger.warning(f"[SYNC] Exchange unavailable: {e}."); return
     except Exception as e: op_logger.error(f"[SYNC] Error: {e}", exc_info=True); return
 
