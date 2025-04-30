@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import ccxt
-from ccxt.base.errors import OrderNotFound, RateLimitExceeded, ExchangeNotAvailable, OnMaintenance
+from ccxt.base.errors import OrderNotFound, RateLimitExceeded, ExchangeNotAvailable, OnMaintenance, RequestTimeout
 import pandas as pd
 import pandas_ta as ta
 import time
@@ -14,6 +14,7 @@ import math
 import uuid # 고유 ID 생성을 위해 추가
 from functools import partial # for callback arguments
 import numpy as np # NaN 처리를 위해 추가
+import ssl # For WebSocket connection robustness
 
 # zoneinfo는 Python 3.9 이상, 하위 버전은 pytz 필요
 try:
@@ -22,7 +23,7 @@ except ImportError:
     from pytz import timezone as ZoneInfo # Fallback for older Python
 
 # ==============================================================================
-# 사용자 설정 값 (*** 블랙리스트 시간 변경 ***)
+# 사용자 설정 값
 # ==============================================================================
 # !!! 실제 거래용 API 키 및 시크릿 키 !!!
 API_KEY = "YOUR_BINANCE_API_KEY"
@@ -46,17 +47,19 @@ STOCH_RSI_PERIOD = 21
 STOCH_RSI_K = 10
 STOCH_RSI_D = 10
 
-# 포지션 조건 설정 (*** 시간 제한 없음, 블랙리스트 시간 변경 ***)
+# 포지션 조건 설정
 STOCH_RSI_LONG_ENTRY_THRESH = 15
 STOCH_RSI_SHORT_ENTRY_THRESH = 85
 LONG_STOP_LOSS_FACTOR = 0.99
 SHORT_STOP_LOSS_FACTOR = 1.01
-POSITION_MONITORING_DELAY_MINUTES = 5 # TP 업데이트 시작 딜레이
-WHIPSAW_BLACKLIST_HOURS = 2         # <<< --- 블랙리스트 2시간으로 변경
+POSITION_MONITORING_DELAY_MINUTES = 5
+WHIPSAW_BLACKLIST_HOURS = 2         # 블랙리스트 2시간
 TP_UPDATE_THRESHOLD_PERCENT = 0.1
 
-# 동기화 설정
-SYNC_INTERVAL_MINUTES = 5
+# 동기화 및 재연결 설정
+SYNC_INTERVAL_MINUTES = 5           # 상태 동기화 주기 (분)
+RECONNECT_DELAY_SECONDS = 15        # 웹소켓 재연결 시도 전 대기 시간 (초)
+MAX_RECONNECT_ATTEMPTS = 10         # 최대 재연결 시도 횟수 (None이면 무한)
 
 # 수수료 설정
 FEE_RATE = 0.0005
@@ -81,8 +84,8 @@ log_dir = os.path.dirname(os.path.abspath(__file__))
 # 운영 로그
 op_logger = logging.getLogger('operation')
 op_logger.setLevel(logging.INFO)
-op_formatter = logging.Formatter('%(asctime)s - %(levelname)s - [REAL_WS_SLTP_ONLY] - %(message)s') # Prefix 변경
-op_handler = logging.FileHandler(os.path.join(log_dir, 'operation_real_ws_sltp_only.log')) # 파일명 변경
+op_formatter = logging.Formatter('%(asctime)s - %(levelname)s - [REAL_WS_RECON] - %(message)s') # Prefix 변경
+op_handler = logging.FileHandler(os.path.join(log_dir, 'operation_real_ws_recon.log')) # 파일명 변경
 op_handler.setFormatter(op_formatter)
 op_logger.addHandler(op_handler)
 op_logger.addHandler(logging.StreamHandler())
@@ -90,16 +93,16 @@ op_logger.addHandler(logging.StreamHandler())
 # 매매 로그
 trade_logger = logging.getLogger('trade')
 trade_logger.setLevel(logging.INFO)
-trade_formatter = logging.Formatter('%(asctime)s - [REAL_WS_SLTP_ONLY] - %(message)s')
-trade_handler = logging.FileHandler(os.path.join(log_dir, 'trade_real_ws_sltp_only.log'))
+trade_formatter = logging.Formatter('%(asctime)s - [REAL_WS_RECON] - %(message)s')
+trade_handler = logging.FileHandler(os.path.join(log_dir, 'trade_real_ws_recon.log'))
 trade_handler.setFormatter(trade_formatter)
 trade_logger.addHandler(trade_handler)
 
 # 자산 로그
 asset_logger = logging.getLogger('asset')
 asset_logger.setLevel(logging.INFO)
-asset_formatter = logging.Formatter('%(asctime)s - [REAL_WS_SLTP_ONLY] - %(message)s')
-asset_handler = logging.FileHandler(os.path.join(log_dir, 'asset_real_ws_sltp_only.log'))
+asset_formatter = logging.Formatter('%(asctime)s - [REAL_WS_RECON] - %(message)s')
+asset_handler = logging.FileHandler(os.path.join(log_dir, 'asset_real_ws_recon.log'))
 asset_handler.setFormatter(asset_formatter)
 asset_logger.addHandler(asset_handler)
 
@@ -113,9 +116,9 @@ historical_data = {}; data_lock = Lock()
 blacklist = {}; blacklist_lock = Lock()
 entry_in_progress = {}; entry_lock = Lock()
 last_asset_log_time = datetime.now(UTC)
-websocket_running = True
-subscribed_symbols = set()
-binance_rest = None
+# websocket_running 플래그는 메인 루프에서 관리
+subscribed_symbols = set() # WS용 심볼 이름 저장 (대문자)
+binance_rest = None # CCXT 인스턴스
 
 # ==============================================================================
 # API 및 데이터 처리 함수 (이전과 동일)
@@ -148,12 +151,11 @@ def fetch_initial_ohlcv(symbol_ccxt, timeframe=TIMEFRAME, limit=INITIAL_CANDLE_F
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True); df.set_index('timestamp', inplace=True); return df
      except Exception as e: op_logger.error(f"Error fetching initial OHLCV for {symbol_ccxt}: {e}"); return None
 
-def calculate_indicators(df): # BBands, Stoch 만 계산
+def calculate_indicators(df):
     required_len = max(BBANDS_PERIOD, STOCH_RSI_PERIOD * 2)
     if df is None or len(df) < required_len: return None
     try:
-        df_copy = df.copy()
-        df_copy.ta.bbands(length=BBANDS_PERIOD, std=BBANDS_STDDEV, append=True)
+        df_copy = df.copy(); df_copy.ta.bbands(length=BBANDS_PERIOD, std=BBANDS_STDDEV, append=True)
         df_copy.ta.stochrsi(length=STOCH_RSI_PERIOD, rsi_length=STOCH_RSI_PERIOD, k=STOCH_RSI_K, d=STOCH_RSI_D, append=True)
         rename_map = {f'BBL_{BBANDS_PERIOD}_{BBANDS_STDDEV}': 'BBL', f'BBM_{BBANDS_PERIOD}_{BBANDS_STDDEV}': 'BBM', f'BBU_{BBANDS_PERIOD}_{BBANDS_STDDEV}': 'BBU', f'STOCHRSIk_{STOCH_RSI_PERIOD}_{STOCH_RSI_PERIOD}_{STOCH_RSI_K}_{STOCH_RSI_D}': 'STOCHk', f'STOCHRSId_{STOCH_RSI_PERIOD}_{STOCH_RSI_PERIOD}_{STOCH_RSI_K}_{STOCH_RSI_D}': 'STOCHd'}
         existing_rename_map = {k: v for k, v in rename_map.items() if k in df_copy.columns}; df_copy.rename(columns=existing_rename_map, inplace=True)
@@ -164,19 +166,14 @@ def calculate_indicators(df): # BBands, Stoch 만 계산
 
 def set_isolated_margin(symbol_ccxt, leverage):
     # ... (이전과 동일) ...
-    if not binance_rest: return False
-    op_logger.info(f"Setting ISOLATED margin {symbol_ccxt}/{leverage}x...")
-    try:
-        binance_rest.set_margin_mode('ISOLATED', symbol_ccxt, params={}); time.sleep(0.2)
-        binance_rest.set_leverage(leverage, symbol_ccxt, params={}); op_logger.info(f"Set ISOLATED/{leverage}x OK."); return True
-    except ccxt.ExchangeError as e:
-        error_msg = str(e)
-        if 'Margin type already set' in error_msg or 'No need to change margin type' in error_msg:
-            op_logger.warning(f"{symbol_ccxt} already ISOLATED.")
-            try: binance_rest.set_leverage(leverage, symbol_ccxt, params={}); op_logger.info(f"Set Leverage {leverage}x OK."); return True
-            except Exception as le: op_logger.error(f"Failed set leverage (already iso) {symbol_ccxt}: {le}"); return False
-        elif 'position exists' in error_msg: op_logger.warning(f"Can't change margin/lev, position exists? {symbol_ccxt}."); return False
-        else: op_logger.error(f"Failed set ISOLATED {symbol_ccxt}: {e}"); return False
+    if not binance_rest: return False; op_logger.info(f"Setting ISOLATED margin {symbol_ccxt}/{leverage}x...")
+    try: binance_rest.set_margin_mode('ISOLATED', symbol_ccxt, params={}); time.sleep(0.2); binance_rest.set_leverage(leverage, symbol_ccxt, params={}); op_logger.info(f"Set ISOLATED/{leverage}x OK."); return True
+    except ccxt.ExchangeError as e: error_msg = str(e)
+    if 'Margin type already set' in error_msg or 'No need to change margin type' in error_msg: op_logger.warning(f"{symbol_ccxt} already ISOLATED.");
+    try: binance_rest.set_leverage(leverage, symbol_ccxt, params={}); op_logger.info(f"Set Leverage {leverage}x OK."); return True
+    except Exception as le: op_logger.error(f"Failed set leverage (already iso) {symbol_ccxt}: {le}"); return False
+    elif 'position exists' in error_msg: op_logger.warning(f"Can't change margin/lev, position exists? {symbol_ccxt}."); return False
+    else: op_logger.error(f"Failed set ISOLATED {symbol_ccxt}: {e}"); return False
     except Exception as e: op_logger.error(f"Unexpected error setting isolated {symbol_ccxt}: {e}"); return False
 
 def place_market_order_real(symbol_ccxt, side, amount, current_price):
@@ -198,35 +195,23 @@ def place_market_order_real(symbol_ccxt, side, amount, current_price):
 
 def place_stop_market_order(symbol_ccxt, side, stop_price, amount):
     # ... (이전과 동일) ...
-    if not binance_rest: op_logger.error(f"[{symbol_ccxt}] CCXT needed for SL."); return None
-    op_logger.info(f"[REAL SL ORDER] Attempt {side.upper()} {amount:.8f} {symbol_ccxt} if price hits {stop_price:.4f}")
+    if not binance_rest: op_logger.error(f"[{symbol_ccxt}] CCXT needed for SL."); return None; op_logger.info(f"[REAL SL ORDER] Attempt {side.upper()} {amount:.8f} {symbol_ccxt} if price hits {stop_price:.4f}")
     try:
-        market = binance_rest.market(symbol_ccxt); adjusted_amount = binance_rest.amount_to_precision(symbol_ccxt, amount)
-        stop_price_str = binance_rest.price_to_precision(symbol_ccxt, stop_price)
+        market = binance_rest.market(symbol_ccxt); adjusted_amount = binance_rest.amount_to_precision(symbol_ccxt, amount); stop_price_str = binance_rest.price_to_precision(symbol_ccxt, stop_price)
         if float(adjusted_amount) <= 0: op_logger.error(f"[{symbol_ccxt}] SL Adj amount <= 0."); return None
-        params = {'reduceOnly': True, 'stopPrice': stop_price_str}
-        order = binance_rest.create_order(symbol_ccxt, 'STOP_MARKET', side, adjusted_amount, None, params)
-        order_id = order.get('id')
-        op_logger.info(f"[REAL SL ORDER PLACED] ID:{order_id} Sym:{symbol_ccxt} Side:{side} StopPx:{stop_price_str} Amt:{adjusted_amount}")
-        trade_logger.info(f"REAL SL SET: {side.upper()} {symbol_ccxt}, Amt:{adjusted_amount}, StopPx:{stop_price_str}, ID:{order_id}")
-        return order_id
+        params = {'reduceOnly': True, 'stopPrice': stop_price_str}; order = binance_rest.create_order(symbol_ccxt, 'STOP_MARKET', side, adjusted_amount, None, params); order_id = order.get('id')
+        op_logger.info(f"[REAL SL ORDER PLACED] ID:{order_id} Sym:{symbol_ccxt} Side:{side} StopPx:{stop_price_str} Amt:{adjusted_amount}"); trade_logger.info(f"REAL SL SET: {side.upper()} {symbol_ccxt}, Amt:{adjusted_amount}, StopPx:{stop_price_str}, ID:{order_id}"); return order_id
     except ccxt.ExchangeError as e: op_logger.error(f"[SL ORDER FAILED] Exch error {symbol_ccxt}: {e}"); return None
     except Exception as e: op_logger.error(f"[SL ORDER FAILED] Unexp error {symbol_ccxt}: {e}", exc_info=True); return None
 
 def place_take_profit_market_order(symbol_ccxt, side, stop_price, amount):
     # ... (이전과 동일) ...
-    if not binance_rest: op_logger.error(f"[{symbol_ccxt}] CCXT needed for TP."); return None
-    op_logger.info(f"[REAL TP ORDER] Attempt {side.upper()} {amount:.8f} {symbol_ccxt} if price hits {stop_price:.4f}")
+    if not binance_rest: op_logger.error(f"[{symbol_ccxt}] CCXT needed for TP."); return None; op_logger.info(f"[REAL TP ORDER] Attempt {side.upper()} {amount:.8f} {symbol_ccxt} if price hits {stop_price:.4f}")
     try:
-        market = binance_rest.market(symbol_ccxt); adjusted_amount = binance_rest.amount_to_precision(symbol_ccxt, amount)
-        stop_price_str = binance_rest.price_to_precision(symbol_ccxt, stop_price)
+        market = binance_rest.market(symbol_ccxt); adjusted_amount = binance_rest.amount_to_precision(symbol_ccxt, amount); stop_price_str = binance_rest.price_to_precision(symbol_ccxt, stop_price)
         if float(adjusted_amount) <= 0: op_logger.error(f"[{symbol_ccxt}] TP Adj amount <= 0."); return None
-        params = {'reduceOnly': True, 'stopPrice': stop_price_str}
-        order = binance_rest.create_order(symbol_ccxt, 'TAKE_PROFIT_MARKET', side, adjusted_amount, None, params)
-        order_id = order.get('id')
-        op_logger.info(f"[REAL TP ORDER PLACED] ID:{order_id} Sym:{symbol_ccxt} Side:{side} StopPx:{stop_price_str} Amt:{adjusted_amount}")
-        trade_logger.info(f"REAL TP SET: {side.upper()} {symbol_ccxt}, Amt:{adjusted_amount}, StopPx:{stop_price_str}, ID:{order_id}")
-        return order_id
+        params = {'reduceOnly': True, 'stopPrice': stop_price_str}; order = binance_rest.create_order(symbol_ccxt, 'TAKE_PROFIT_MARKET', side, adjusted_amount, None, params); order_id = order.get('id')
+        op_logger.info(f"[REAL TP ORDER PLACED] ID:{order_id} Sym:{symbol_ccxt} Side:{side} StopPx:{stop_price_str} Amt:{adjusted_amount}"); trade_logger.info(f"REAL TP SET: {side.upper()} {symbol_ccxt}, Amt:{adjusted_amount}, StopPx:{stop_price_str}, ID:{order_id}"); return order_id
     except ccxt.ExchangeError as e: op_logger.error(f"[TP ORDER FAILED] Exch error {symbol_ccxt}: {e}"); return None
     except Exception as e: op_logger.error(f"[TP ORDER FAILED] Unexp error {symbol_ccxt}: {e}", exc_info=True); return None
 
@@ -234,8 +219,7 @@ def cancel_order(symbol_ccxt, order_id):
     # ... (이전과 동일) ...
     if not binance_rest or not order_id: op_logger.debug(f"Cancel skipped {symbol_ccxt}, no id."); return True
     op_logger.info(f"Attempting to cancel order {order_id} for {symbol_ccxt}...")
-    try:
-        binance_rest.cancel_order(order_id, symbol_ccxt); op_logger.info(f"Successfully cancelled order {order_id}."); return True
+    try: binance_rest.cancel_order(order_id, symbol_ccxt); op_logger.info(f"Successfully cancelled order {order_id}."); return True
     except OrderNotFound: op_logger.warning(f"Order {order_id} not found for {symbol_ccxt} (already exec/cancel?)."); return True
     except (ExchangeNotAvailable, OnMaintenance) as e: op_logger.error(f"Cannot cancel {order_id} due to exchange issue: {e}"); return False
     except RateLimitExceeded as e: op_logger.error(f"Rate limit cancelling {order_id}: {e}"); return False
@@ -249,36 +233,47 @@ def check_symbol_in_blacklist(symbol_ws):
     return False
 
 def add_to_blacklist(symbol_ws, reason=""):
-    with blacklist_lock:
-        # <<<--- 블랙리스트 기간 2시간 적용 ---<<<
-        expiry_time = datetime.now(UTC) + timedelta(hours=WHIPSAW_BLACKLIST_HOURS) # WHIPSAW_BLACKLIST_HOURS = 2
-        blacklist[symbol_ws] = expiry_time
-        op_logger.warning(f"Blacklisted {symbol_ws} until {expiry_time.astimezone(KST).strftime('%Y-%m-%d %H:%M:%S KST')}. Reason: {reason}")
+    with blacklist_lock: expiry_time = datetime.now(UTC) + timedelta(hours=WHIPSAW_BLACKLIST_HOURS); blacklist[symbol_ws] = expiry_time; op_logger.warning(f"Blacklisted {symbol_ws} until {expiry_time.astimezone(KST).strftime('%H:%M:%S KST')}. Reason: {reason}")
 
 def log_asset_status():
     # ... (이전과 동일) ...
-    global last_asset_log_time, total_trades, winning_trades
-    now = datetime.now(UTC);
-    if now - last_asset_log_time >= timedelta(hours=1):
-        balance = get_current_balance()
-        with stats_lock: cur_trades, cur_wins = total_trades, winning_trades
-        win_rate = (cur_wins / cur_trades * 100) if cur_trades > 0 else 0.0
-        asset_logger.info(f"Balance:{balance:.2f}, Trades:{cur_trades}, Wins:{cur_wins}(Inaccurate), WinRate:{win_rate:.2f}%")
-        last_asset_log_time = now
+    global last_asset_log_time, total_trades, winning_trades; now = datetime.now(UTC);
+    if now - last_asset_log_time >= timedelta(hours=1): balance = get_current_balance();
+    with stats_lock: cur_trades, cur_wins = total_trades, winning_trades
+    win_rate = (cur_wins / cur_trades * 100) if cur_trades > 0 else 0.0; asset_logger.info(f"Balance:{balance:.2f}, Trades:{cur_trades}, Wins:{cur_wins}(Inaccurate), WinRate:{win_rate:.2f}%"); last_asset_log_time = now
 
 # ==============================================================================
-# 상태 동기화 로직 (*** 블랙리스트 로직 수정 ***)
+# 상태 동기화 로직 (*** fetch_open_orders 방식 수정됨, 블랙리스트 로직 수정됨 ***)
 # ==============================================================================
 def sync_positions_with_exchange():
     global real_positions, total_trades
-    op_logger.info("[SYNC] Starting state synchronization...")
+    op_logger.info("[SYNC] Starting state synchronization with exchange...")
     if not binance_rest: op_logger.error("[SYNC] CCXT instance not ready."); return
     orders_to_cancel_sync = []; positions_to_close_untracked_sync = []
     try:
-        exchange_pos = binance_rest.fetch_positions(); time.sleep(0.5)
-        exchange_orders = binance_rest.fetch_open_orders() # Use fetch_open_orders without symbol (accept warning/risk)
+        # 1. 거래소 실제 포지션 조회
+        exchange_pos = binance_rest.fetch_positions(); time.sleep(0.5) # API 호출 간격
 
-        current_exchange_pos_dict = {}
+        # *** 2. 미체결 주문 조회 (심볼별 조회로 수정) ***
+        op_logger.info(f"[SYNC] Fetching open orders for relevant symbols...")
+        all_open_orders = []
+        symbols_to_fetch_orders = set()
+        with real_positions_lock: symbols_to_fetch_orders.update(real_positions.keys())
+        symbols_to_fetch_orders.update(subscribed_symbols) # 구독 심볼도 포함
+
+        for symbol_ws in symbols_to_fetch_orders:
+            symbol_ccxt = symbol_ws.replace('USDT','/USDT')
+            try:
+                orders = binance_rest.fetch_open_orders(symbol=symbol_ccxt)
+                if orders: all_open_orders.extend(orders)
+                time.sleep(0.2) # 심볼별 조회 딜레이
+            except RateLimitExceeded as e: op_logger.warning(f"[SYNC] Rate limit fetching orders for {symbol_ccxt}. Skipping rest."); break
+            except Exception as e: op_logger.error(f"[SYNC] Error fetching open orders for {symbol_ccxt}: {e}")
+        op_logger.info(f"[SYNC] Fetched total {len(all_open_orders)} open orders.")
+        # *** 조회 방식 수정 완료 ***
+
+        # 3. 조회된 정보 가공 (all_open_orders 사용)
+        current_exchange_pos_dict = {} # {symbol_ws: info}
         for pos in exchange_pos:
             try:
                 amount = float(pos.get('info', {}).get('positionAmt', 0))
@@ -287,15 +282,16 @@ def sync_positions_with_exchange():
                     if symbol_ccxt: symbol_ws = symbol_ccxt.replace('/USDT', 'USDT'); current_exchange_pos_dict[symbol_ws] = {'side': 'long' if amount > 0 else 'short', 'amount': abs(amount), 'entry_price': float(pos.get('entryPrice', 0)), 'symbol_ccxt': symbol_ccxt}
             except Exception as parse_err: op_logger.error(f"[SYNC] Error parsing pos data: {pos.get('info')}, Err: {parse_err}")
 
-        open_sl_tp_order_ids = {o['id'] for o in exchange_orders if o.get('type') in ['STOP_MARKET', 'TAKE_PROFIT_MARKET'] and o.get('status') == 'open'}
+        open_sl_tp_order_ids = {o['id'] for o in all_open_orders if o.get('type') in ['STOP_MARKET', 'TAKE_PROFIT_MARKET'] and o.get('status') == 'open'}
         open_orders_by_symbol = {}
-        for o in exchange_orders:
+        for o in all_open_orders:
              if o.get('status') == 'open':
                   symbol_ccxt = o.get('symbol');
                   if symbol_ccxt: symbol_ws = symbol_ccxt.replace('/USDT', 'USDT');
                   if symbol_ws not in open_orders_by_symbol: open_orders_by_symbol[symbol_ws] = []
                   open_orders_by_symbol[symbol_ws].append(o['id'])
 
+        # 4. 로컬 상태와 비교 및 조정 계획 수립 (Lock 사용 필수)
         with real_positions_lock:
             local_pos_symbols = set(real_positions.keys()); exchange_pos_symbols = set(current_exchange_pos_dict.keys())
 
@@ -303,19 +299,19 @@ def sync_positions_with_exchange():
             symbols_to_remove_local = local_pos_symbols - exchange_pos_symbols
             for symbol_ws in symbols_to_remove_local:
                 op_logger.warning(f"[SYNC] Local pos {symbol_ws} not on exchange. Removing.")
-                local_pos_info = real_positions.pop(symbol_ws)
+                local_pos_info = real_positions.pop(symbol_ws) # 로컬에서 제거
                 sl_id, tp_id = local_pos_info.get('sl_order_id'), local_pos_info.get('tp_order_id'); symbol_ccxt = symbol_ws.replace('USDT', '/USDT')
 
                 # *** 블랙리스트 로직: SL 주문이 사라졌는지 확인 ***
                 if sl_id and sl_id not in open_sl_tp_order_ids:
-                    op_logger.warning(f"[SYNC] Position {symbol_ws} closed and SL order {sl_id} not found. Assuming SL execution -> Blacklisting.")
-                    add_to_blacklist(symbol_ws, reason="Closed on exchange, SL likely hit") # <<<--- 블랙리스트 추가!
+                    op_logger.warning(f"[SYNC] Position {symbol_ws} closed and SL order {sl_id} not found. Assuming SL execution -> Blacklisting for {WHIPSAW_BLACKLIST_HOURS} hours.")
+                    add_to_blacklist(symbol_ws, reason="Closed on exchange, SL likely hit") # <<< --- 블랙리스트 추가! (2시간)
                 else: # SL이 아직 있거나 원래 없었다면 (TP 또는 다른 이유로 종료됨)
                     if sl_id in open_sl_tp_order_ids: orders_to_cancel_sync.append({'symbol_ccxt': symbol_ccxt, 'id': sl_id}) # 남은 SL 취소
 
-                # TP 주문도 확인 및 취소 목록 추가
+                # 남은 TP 주문도 취소 목록 추가
                 if tp_id and tp_id in open_sl_tp_order_ids: orders_to_cancel_sync.append({'symbol_ccxt': symbol_ccxt, 'id': tp_id}) # 남은 TP 취소
-                # with stats_lock: total_trades += 1 # 통계 로직은 별도 개선 필요
+                # with stats_lock: total_trades += 1
 
             # Case 2: 거래소 O / 로컬 X -> 즉시 종료
             symbols_to_add_or_close = exchange_pos_symbols - local_pos_symbols
@@ -336,7 +332,7 @@ def sync_positions_with_exchange():
                      if order_id not in [sl_id_local, tp_id_local]: op_logger.warning(f"[SYNC] Orphaned order {order_id} for {symbol_ws}? Marking cancel."); orders_to_cancel_sync.append({'symbol_ccxt': symbol_ccxt, 'id': order_id})
 
         # 5. 동기화 작업 실행 (Lock 해제 후)
-        op_logger.info(f"[SYNC] Actions: Close {len(positions_to_close_untracked_sync)}, Cancel {len(orders_to_cancel_sync)}.")
+        op_logger.info(f"[SYNC] Actions: Close {len(positions_to_close_untracked_sync)}, Cancel {len(orders_to_cancel_sync)} orders.")
         for pos_data in positions_to_close_untracked_sync:
             symbol_ccxt = pos_data['symbol_ccxt']; op_logger.warning(f"[SYNC] Closing untracked {symbol_ccxt}...")
             try: ticker = binance_rest.fetch_ticker(symbol_ccxt); price = ticker['last']; place_market_order_real(symbol_ccxt, pos_data['side_to_close'], pos_data['amount'], price)
@@ -351,13 +347,22 @@ def sync_positions_with_exchange():
     except (ExchangeNotAvailable, OnMaintenance) as e: op_logger.warning(f"[SYNC] Exchange unavailable: {e}."); return
     except Exception as e: op_logger.error(f"[SYNC] Error: {e}", exc_info=True); return
 
+# *** sync_state_periodically 함수 수정됨 (내부 들여쓰기) ***
 def sync_state_periodically(interval_seconds):
-    global websocket_running; op_logger.info(f"Sync thread started. Interval: {interval_seconds}s.")
+    """지정된 간격으로 동기화 함수를 실행하는 쓰레드 함수"""
+    global websocket_running
+    op_logger.info(f"State synchronization thread starting. Interval: {interval_seconds} seconds.")
     while websocket_running:
         try:
+            # 먼저 인터벌만큼 대기
             time.sleep(interval_seconds)
-            if websocket_running: sync_positions_with_exchange() # 올바른 들여쓰기
-        except Exception as e: op_logger.error(f"Error in sync loop: {e}", exc_info=True); time.sleep(60)
+            # 대기 후에도 웹소켓이 실행 중인지 확인하고 동기화 실행
+            if websocket_running:
+                sync_positions_with_exchange() # <<< --- 올바른 들여쓰기
+        except Exception as e:
+             op_logger.error(f"Error in sync_state_periodically loop: {e}", exc_info=True)
+             # 에러 발생 시 짧은 시간 내 반복적인 에러 로깅 방지 위해 대기
+             time.sleep(60)
 
 # ==============================================================================
 # 웹소켓 처리 로직 (*** Stoch 정리 로직 제거, TP 업데이트만 남김 ***)
@@ -365,8 +370,7 @@ def sync_state_periodically(interval_seconds):
 
 def update_historical_data(symbol_ws, kline_data):
     # ... (이전과 동일) ...
-    global historical_data
-    with data_lock:
+    global historical_data; with data_lock:
         if symbol_ws not in historical_data: return False
         df = historical_data[symbol_ws]; kline_start_time = pd.to_datetime(kline_data['t'], unit='ms', utc=True)
         new_data = pd.DataFrame([{'timestamp': kline_start_time, 'open': float(kline_data['o']), 'high': float(kline_data['h']), 'low': float(kline_data['l']), 'close': float(kline_data['c']), 'volume': float(kline_data['v'])}]).set_index('timestamp')
@@ -380,19 +384,19 @@ def try_update_tp(open_symbol, open_symbol_ccxt, side, amount, tp_order_id, curr
     price_diff_percent = abs(new_tp_target - current_tp_price) / current_tp_price * 100 if current_tp_price > 0 else 0
     if price_diff_percent >= TP_UPDATE_THRESHOLD_PERCENT:
         op_logger.info(f"[{open_symbol}] TP target changed: {current_tp_price:.4f} -> {new_tp_target:.4f}. Updating TP order...")
-        if cancel_order(open_symbol_ccxt, tp_order_id):
+        if cancel_order(open_symbol_ccxt, tp_order_id): # 기존 TP 취소
             tp_side = 'sell' if side == 'long' else 'buy'
             new_tp_id, new_tp_actual_price = None, None
-            try:
+            try: # 새 TP 주문
                 adjusted_amount_str = binance_rest.amount_to_precision(open_symbol_ccxt, amount)
                 new_tp_target_str = binance_rest.price_to_precision(open_symbol_ccxt, new_tp_target)
                 new_tp_actual_price = float(new_tp_target_str)
                 new_tp_id = place_take_profit_market_order(open_symbol_ccxt, tp_side, new_tp_actual_price, float(adjusted_amount_str))
             except Exception as tp_e: op_logger.error(f"[{open_symbol}] Error placing new TP order: {tp_e}")
 
-            if new_tp_id:
-                with real_positions_lock: # Lock 잡고 업데이트
-                    if open_symbol in real_positions:
+            if new_tp_id: # 새 TP 주문 성공 시 상태 업데이트
+                with real_positions_lock:
+                    if open_symbol in real_positions: # 포지션 여전히 존재하는지 확인
                         real_positions[open_symbol]['tp_order_id'] = new_tp_id
                         real_positions[open_symbol]['current_tp_price'] = new_tp_actual_price
                         op_logger.info(f"[{open_symbol}] TP order updated to {new_tp_actual_price:.4f} (ID: {new_tp_id}).")
@@ -408,7 +412,7 @@ def process_kline_message(symbol_ws, kline_data):
 
     with data_lock: current_df = historical_data.get(symbol_ws)
     if current_df is None: return
-    indicator_df = calculate_indicators(current_df) # Stoch(21,10,10), BBands 계산
+    indicator_df = calculate_indicators(current_df) # Stoch, BBands 계산
     if indicator_df is None or indicator_df.empty: return
 
     try: # 지표 추출
@@ -437,6 +441,7 @@ def process_kline_message(symbol_ws, kline_data):
         open_symbol_ccxt = open_symbol.replace('USDT','/USDT')
         time_since_entry = now_utc - entry_time
 
+        # 5분 딜레이 체크 (TP 업데이트에도 적용)
         if time_since_entry < timedelta(minutes=POSITION_MONITORING_DELAY_MINUTES): continue
 
         # --- Stoch 정리 로직 삭제됨 ---
@@ -448,18 +453,21 @@ def process_kline_message(symbol_ws, kline_data):
                  if try_update_tp(open_symbol, open_symbol_ccxt, side, amount, tp_order_id, current_tp_price, new_tp_target):
                       processed_symbols_in_loop.add(open_symbol)
 
+
     # === 2. 신규 진입 조건 확인 (캔들 종료 시) ===
     with real_positions_lock, entry_lock:
-        if symbol_ws in processed_symbols_in_loop: return
+        if symbol_ws in processed_symbols_in_loop: return # 이미 처리된 심볼
 
         position_info_after_exit = real_positions.get(symbol_ws)
         is_entry_attempted = entry_in_progress.get(symbol_ws, False)
         current_open_count = len(real_positions)
 
+        # 진입 조건: 포지션 없고, 진입 시도 중 아니고, 캔들 종료 시
         if position_info_after_exit is None and not is_entry_attempted and is_candle_closed:
             if check_symbol_in_blacklist(symbol_ws): return
             if current_open_count >= MAX_OPEN_POSITIONS: return
 
+            # --- 진입 조건 체크 ---
             target_side, stop_loss_price_target, take_profit_price_target = None, None, None
             entry_trigger_price = current_price
             long_stoch_cond = stoch_k <= STOCH_RSI_LONG_ENTRY_THRESH and stoch_d <= STOCH_RSI_LONG_ENTRY_THRESH and stoch_k > stoch_d
@@ -468,22 +476,25 @@ def process_kline_message(symbol_ws, kline_data):
             elif short_stoch_cond: target_side = 'sell'; take_profit_price_target = bbl if bbl > 0 else None
 
             if target_side and take_profit_price_target is not None:
-                entry_in_progress[symbol_ws] = True
-                try:
+                entry_in_progress[symbol_ws] = True # 중복 방지 시작
+                try: # --- Start of entry process ---
                     available_balance = get_current_balance()
                     if available_balance <= 0: raise Exception("Zero balance")
+
                     dynamic_margin_percentage = 0.0
                     if current_open_count == 0: dynamic_margin_percentage = 0.25
                     elif current_open_count == 1: dynamic_margin_percentage = 1/3
                     elif current_open_count == 2: dynamic_margin_percentage = 0.50
                     elif current_open_count == 3: dynamic_margin_percentage = 1.00
-                    else: raise Exception("Invalid open count")
+                    else: raise Exception(f"Invalid open count {current_open_count}")
+
+                    if dynamic_margin_percentage <= 0: raise Exception("Dynamic percentage is zero")
 
                     target_margin = available_balance * dynamic_margin_percentage
                     if target_margin <= 0: raise Exception("Target margin <= 0")
                     target_notional_value = target_margin * LEVERAGE
                     MIN_NOTIONAL_VALUE = 5.0
-                    if target_notional_value < MIN_NOTIONAL_VALUE: raise Exception("Target Notional < Min")
+                    if target_notional_value < MIN_NOTIONAL_VALUE: raise Exception(f"Target Notional < Min")
                     order_amount = target_notional_value / entry_trigger_price if entry_trigger_price > 0 else 0
                     if order_amount <= 0: raise Exception("Order amount <= 0")
 
@@ -495,7 +506,7 @@ def process_kline_message(symbol_ws, kline_data):
 
                     if potential_profit <= est_fee: raise Exception("Profitability check failed")
 
-                    op_logger.info(f"[{symbol_ws}] Entry condition MET for {target_side.upper()}. Placing order...")
+                    op_logger.info(f"[{symbol_ws}] Entry condition MET for {target_side.upper()}. Preparing order...")
                     if not set_isolated_margin(symbol_ccxt, LEVERAGE): raise Exception("Set isolated margin failed")
 
                     entry_order_result = place_market_order_real(symbol_ccxt, target_side, order_amount, entry_trigger_price)
@@ -511,11 +522,11 @@ def process_kline_message(symbol_ws, kline_data):
 
                     op_logger.info(f"[{symbol_ws}] Entry filled. Placing SL/TP...")
                     final_sl_price = entry_price * LONG_STOP_LOSS_FACTOR if target_side == 'buy' else entry_price * SHORT_STOP_LOSS_FACTOR
-                    final_tp_price = take_profit_price_target
+                    final_tp_price = take_profit_price_target # Use TP target from entry decision
 
                     sl_order_id, tp_order_id = None, None
                     adjusted_filled_amount = None
-                    try:
+                    try: # SL/TP 주문
                         adjusted_filled_amount_str = binance_rest.amount_to_precision(symbol_ccxt, filled_amount)
                         final_sl_price_str = binance_rest.price_to_precision(symbol_ccxt, final_sl_price)
                         final_tp_price_str = binance_rest.price_to_precision(symbol_ccxt, final_tp_price)
@@ -527,18 +538,18 @@ def process_kline_message(symbol_ws, kline_data):
                         if final_tp_price_str and adjusted_filled_amount > 0: tp_order_id = place_take_profit_market_order(symbol_ccxt, tp_side, float(final_tp_price_str), adjusted_filled_amount)
 
                         if sl_order_id is None or tp_order_id is None: raise Exception("SL or TP order placement failed.")
-                    except Exception as pe:
+                    except Exception as pe: # SL/TP 실패 시 롤백
                         op_logger.error(f"[{symbol_ws}] Error placing SL/TP: {pe}. ROLLING BACK ENTRY!")
                         if entry_order_result: place_market_order_real(symbol_ccxt, 'sell' if target_side == 'buy' else 'buy', filled_amount, entry_price)
                         cancel_order(symbol_ccxt, sl_order_id); cancel_order(symbol_ccxt, tp_order_id)
-                        raise pe
+                        raise pe # 에러 다시 발생
 
-                    # 포지션 정보 저장
-                    current_open_count_final = len(real_positions) # Lock은 잡혀 있음
+                    # SL/TP 성공 시 포지션 저장 (Lock은 이미 잡혀 있음)
+                    current_open_count_final = len(real_positions)
                     if current_open_count_final < MAX_OPEN_POSITIONS:
                         real_positions[symbol_ws] = {'side': 'long' if target_side == 'buy' else 'short', 'entry_price': entry_price, 'amount': float(filled_amount), 'entry_time': entry_time_utc, 'sl_order_id': sl_order_id, 'tp_order_id': tp_order_id, 'current_tp_price': float(final_tp_price_str) if final_tp_price_str else None}
                         op_logger.info(f"[{symbol_ws}] Entered & Tracking with SL/TP. Active: {len(real_positions)}")
-                    else:
+                    else: # Safeguard
                         op_logger.warning(f"[{symbol_ws}] Entered & SL/TP OK, but max pos! Closing!")
                         cancel_order(symbol_ccxt, sl_order_id); cancel_order(symbol_ccxt, tp_order_id)
                         place_market_order_real(symbol_ccxt, 'sell' if target_side == 'buy' else 'buy', filled_amount, entry_price)
@@ -565,7 +576,7 @@ def on_message(wsapp, message):
 
 def on_error(wsapp, error): op_logger.error(f"WebSocket Error: {error}")
 def on_close(wsapp, close_status_code, close_msg):
-    global websocket_running; op_logger.info(f"WebSocket closed. Code:{close_status_code}, Msg:{close_msg}"); websocket_running = False
+    global websocket_running; op_logger.info(f"WebSocket closed. Code:{close_status_code}, Msg:{close_msg}"); # websocket_running = False <-- 재연결 위해 False 설정 안 함
 
 def on_open(wsapp, symbols_ws, timeframe):
     # ... (이전과 동일) ...
@@ -585,10 +596,11 @@ def on_open(wsapp, symbols_ws, timeframe):
             else: op_logger.warning(f"No initial data for {symbol_upper}."); fetch_errors += 1
             time.sleep(0.3)
     op_logger.info(f"Initial data fetch complete ({len(historical_data)} OK, {fetch_errors} errors).")
-    print("-" * 80 + "\nWebSocket connected. Listening for REAL TRADING signals (Stoch Entry, SL/TP Exit Mode)...\n" + "-" * 80) # 문구 수정
+    print("-" * 80 + "\nWebSocket connected. Listening for REAL TRADING signals (SL/TP Exit Mode)...\n" + "-" * 80) # 문구 수정
+
 
 # ==============================================================================
-# 메인 실행 로직
+# 메인 실행 로직 (*** 재연결 로직 추가됨 ***)
 # ==============================================================================
 if __name__ == "__main__":
     start_time_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -597,9 +609,9 @@ if __name__ == "__main__":
     if SIMULATION_MODE: op_logger.error("Set SIMULATION_MODE to False."); exit()
     if not API_KEY or not API_SECRET or API_KEY == "YOUR_BINANCE_API_KEY": op_logger.error("API Key/Secret needed!"); exit()
 
-    op_logger.warning("="*30 + " REAL TRADING MODE ACTIVE - Stoch Entry / SL-TP Exit + Dyn TP " + "="*30) # 제목 수정
-    op_logger.warning("!!! Entry: Candle Close + Stoch(21,10,10) | Exit: SL/TP Orders (TP Dynamically Updated) !!!") # 로직 요약 수정
-    op_logger.warning(f"MaxPos:{MAX_OPEN_POSITIONS}, Stoch Entry Thresh:{STOCH_RSI_LONG_ENTRY_THRESH}/{STOCH_RSI_SHORT_ENTRY_THRESH}")
+    op_logger.warning("="*30 + " REAL TRADING MODE ACTIVE - Stoch Entry / SL-TP Exit + Dyn TP + Sync " + "="*30) # 제목 수정
+    op_logger.warning("!!! Entry: Candle Close + Stoch | Exit: SL/TP Orders (TP Updated) !!!") # 로직 요약 수정
+    op_logger.warning(f"MaxPos:{MAX_OPEN_POSITIONS}, Stoch(P:{STOCH_RSI_PERIOD},K:{STOCH_RSI_K},D:{STOCH_RSI_D}) EntryThresh:{STOCH_RSI_LONG_ENTRY_THRESH}/{STOCH_RSI_SHORT_ENTRY_THRESH}")
     op_logger.warning("!!! MONITOR CLOSELY AND USE EXTREME CAUTION !!!")
     op_logger.warning("="*80)
     for i in range(7, 0, -1): print(f"Starting in {i}...", end='\r'); time.sleep(1)
@@ -611,30 +623,65 @@ if __name__ == "__main__":
     sync_positions_with_exchange()
     op_logger.info("Initial sync complete.")
 
+    # 동기화 쓰레드 시작
     sync_thread = Thread(target=sync_state_periodically, args=(SYNC_INTERVAL_MINUTES * 60,), daemon=True)
     sync_thread.start()
 
+    # Top 심볼 목록 가져오기 (웹소켓 연결 전)
     top_symbols_ccxt = get_top_volume_symbols(TOP_N_SYMBOLS)
-    if not top_symbols_ccxt: op_logger.error("Could not fetch top symbols."); exit()
-    top_symbols_ws = [s.replace('/', '') for s in top_symbols_ccxt]
+    if not top_symbols_ccxt: op_logger.error("Could not fetch top symbols. Exiting."); exit()
+    top_symbols_ws = [s.replace('/', '') for s in top_symbols_ccxt] # 최초 실행 시 사용
 
-    ws_url = f"wss://fstream.binance.com/stream?streams={'/'.join([f'{s.lower()}@kline_{TIMEFRAME}' for s in top_symbols_ws])}"
-    op_logger.info(f"Connecting to WebSocket for {len(top_symbols_ws)} streams...")
+    # --- 웹소켓 자동 재연결 루프 ---
+    reconnect_attempts = 0
+    while True:
+        if reconnect_attempts > 0:
+            delay = min(RECONNECT_DELAY_SECONDS * (2**(reconnect_attempts-1)), 300) # Exponential backoff up to 5 mins
+            op_logger.info(f"Attempting reconnect #{reconnect_attempts} in {delay} seconds...")
+            time.sleep(delay)
 
-    on_open_with_args = partial(on_open, symbols_ws=top_symbols_ws, timeframe=TIMEFRAME)
-    wsapp = websocket.WebSocketApp(ws_url, on_open=on_open_with_args, on_message=on_message, on_error=on_error, on_close=on_close)
+        if MAX_RECONNECT_ATTEMPTS is not None and reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
+            op_logger.error("Maximum reconnect attempts reached. Stopping bot.")
+            break
 
-    try: wsapp.run_forever()
-    except KeyboardInterrupt: op_logger.info("Keyboard interrupt.")
-    finally:
-        websocket_running = False
-        if wsapp.sock and wsapp.sock.connected: wsapp.close()
-        op_logger.info("Attempting to fetch final balance...")
-        time.sleep(2)
-        final_balance = get_current_balance()
-        # TODO: Cancel remaining open SL/TP orders
-        with stats_lock: final_trades, final_wins = total_trades, winning_trades
-        final_win_rate = (final_wins / final_trades * 100) if final_trades > 0 else 0
-        final_msg = f"Final Balance:{final_balance:.2f}, Trades:{final_trades}, Wins:{final_wins}(Inaccurate), WinRate:{final_win_rate:.2f}%"
-        op_logger.info(final_msg); asset_logger.info(final_msg)
-        op_logger.info("Real trading bot shutdown complete.")
+        ws_url = f"wss://fstream.binance.com/stream?streams={'/'.join([f'{s.lower()}@kline_{TIMEFRAME}' for s in top_symbols_ws])}"
+        op_logger.info(f"Connecting to WebSocket...")
+
+        # 웹소켓 앱 객체 생성 및 콜백 설정
+        # sslopt 추가하여 일부 환경에서의 SSL 오류 방지 시도 (필요 없을 수 있음)
+        on_open_with_args = partial(on_open, symbols_ws=top_symbols_ws, timeframe=TIMEFRAME)
+        wsapp = websocket.WebSocketApp(ws_url,
+                                      on_open=on_open_with_args,
+                                      on_message=on_message,
+                                      on_error=on_error,
+                                      on_close=on_close)
+        websocket_running = True # 재연결 시 플래그 다시 True로
+
+        try:
+            # 웹소켓 실행 (Blocking)
+            # run_forever에 sslopt 추가 가능: sslopt={"cert_reqs": ssl.CERT_NONE}
+            wsapp.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}) # KeyboardInterrupt 외에는 여기서 빠져나오면 연결 끊김 의미
+            op_logger.warning("WebSocket run_forever loop exited.")
+            # run_forever가 정상 종료(close 메시지 등) 또는 예외로 종료되면 재연결 시도
+            reconnect_attempts += 1
+
+        except KeyboardInterrupt:
+            op_logger.info("Keyboard interrupt detected. Stopping bot.")
+            websocket_running = False # 쓰레드 종료 유도
+            if wsapp.sock and wsapp.sock.connected: wsapp.close()
+            break # 메인 재연결 루프 탈출
+        except Exception as e:
+            op_logger.error(f"Unhandled exception in WebSocket run_forever loop: {e}", exc_info=True)
+            reconnect_attempts += 1
+            # 예기치 않은 오류 시에도 재연결 시도
+
+    # --- 최종 정리 ---
+    op_logger.info("Attempting to fetch final balance...")
+    time.sleep(2)
+    final_balance = get_current_balance()
+    # TODO: Consider canceling all remaining open orders on shutdown
+    with stats_lock: final_trades, final_wins = total_trades, winning_trades
+    final_win_rate = (final_wins / final_trades * 100) if final_trades > 0 else 0
+    final_msg = f"Final Balance:{final_balance:.2f}, Trades:{final_trades}, Wins:{final_wins}(Inaccurate), WinRate:{final_win_rate:.2f}%"
+    op_logger.info(final_msg); asset_logger.info(final_msg)
+    op_logger.info("Real trading bot shutdown complete.")
