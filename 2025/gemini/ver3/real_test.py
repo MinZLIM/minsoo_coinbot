@@ -164,18 +164,49 @@ def calculate_indicators(df):
         return df_copy
     except Exception as e: op_logger.error(f"Indicator Calc Error: {e}"); return None
 
+# --- 격리 마진 설정 (*** 들여쓰기 오류 최종 수정 ***) ---
 def set_isolated_margin(symbol_ccxt, leverage):
-    # ... (이전과 동일) ...
-    if not binance_rest: return False; op_logger.info(f"Setting ISOLATED margin {symbol_ccxt}/{leverage}x...")
-    try: binance_rest.set_margin_mode('ISOLATED', symbol_ccxt, params={}); time.sleep(0.2); binance_rest.set_leverage(leverage, symbol_ccxt, params={}); op_logger.info(f"Set ISOLATED/{leverage}x OK."); return True
-    except ccxt.ExchangeError as e: error_msg = str(e)
-    if 'Margin type already set' in error_msg or 'No need to change margin type' in error_msg: op_logger.warning(f"{symbol_ccxt} already ISOLATED.");
-    try: binance_rest.set_leverage(leverage, symbol_ccxt, params={}); op_logger.info(f"Set Leverage {leverage}x OK."); return True
-    except Exception as le: op_logger.error(f"Failed set leverage (already iso) {symbol_ccxt}: {le}"); return False
-    elif 'position exists' in error_msg: op_logger.warning(f"Can't change margin/lev, position exists? {symbol_ccxt}."); return False
-    else: op_logger.error(f"Failed set ISOLATED {symbol_ccxt}: {e}"); return False
-    except Exception as e: op_logger.error(f"Unexpected error setting isolated {symbol_ccxt}: {e}"); return False
+    if not binance_rest:
+        op_logger.error(f"[{symbol_ccxt}] CCXT instance not ready for margin setting.")
+        return False
+    op_logger.info(f"Setting ISOLATED margin {symbol_ccxt}/{leverage}x...")
+    try:
+        # 1. 마진 모드 설정
+        binance_rest.set_margin_mode('ISOLATED', symbol_ccxt, params={})
+        # 성공 로그는 레버리지 설정 후 한 번에 기록하거나 필요 시 추가
+        time.sleep(0.2) # API 호출 간격
 
+        # 2. 레버리지 설정
+        binance_rest.set_leverage(leverage, symbol_ccxt, params={})
+        op_logger.info(f"Set ISOLATED/{leverage}x for {symbol_ccxt} OK.")
+        return True # 최종 성공 시 True 반환
+
+    except ccxt.ExchangeError as e:
+        error_msg = str(e)
+        # 이미 격리 모드일 경우의 처리 (가장 흔한 예외 중 하나)
+        if 'Margin type already set' in error_msg or 'No need to change margin type' in error_msg:
+            # !!! 수정된 부분: 로그와 다음 로직을 올바르게 들여쓰기 !!!
+            op_logger.warning(f"{symbol_ccxt} already ISOLATED.")
+            try: # 레버리지 설정만 다시 시도
+                 binance_rest.set_leverage(leverage, symbol_ccxt, params={})
+                 op_logger.info(f"Set Leverage {leverage}x OK (margin mode was already isolated).")
+                 return True # 레버리지 설정 성공 시 True 반환
+            except Exception as le:
+                 op_logger.error(f"Failed set leverage (already iso) {symbol_ccxt}: {le}")
+                 return False # 레버리지 설정 실패 시 False 반환
+        # 포지션 존재로 인한 변경 불가 에러 처리
+        elif 'position exists' in error_msg:
+             op_logger.warning(f"Can't change margin/lev, position exists? {symbol_ccxt}.")
+             return False # 설정 실패이므로 False 반환
+        # 그 외 다른 ExchangeError 처리
+        else:
+            op_logger.error(f"Failed set ISOLATED margin/leverage for {symbol_ccxt}: {e}")
+            return False # 설정 실패이므로 False 반환
+    except Exception as e:
+        # ccxt.ExchangeError 외의 다른 예외 처리
+        op_logger.error(f"Unexpected error setting isolated margin/leverage for {symbol_ccxt}: {e}", exc_info=True)
+        return False
+    
 def place_market_order_real(symbol_ccxt, side, amount, current_price):
     # ... (이전과 동일) ...
     if not binance_rest: op_logger.error("CCXT instance needed."); return None
@@ -370,7 +401,8 @@ def sync_state_periodically(interval_seconds):
 
 def update_historical_data(symbol_ws, kline_data):
     # ... (이전과 동일) ...
-    global historical_data; with data_lock:
+    global historical_data
+    with data_lock: 
         if symbol_ws not in historical_data: return False
         df = historical_data[symbol_ws]; kline_start_time = pd.to_datetime(kline_data['t'], unit='ms', utc=True)
         new_data = pd.DataFrame([{'timestamp': kline_start_time, 'open': float(kline_data['o']), 'high': float(kline_data['h']), 'low': float(kline_data['l']), 'close': float(kline_data['c']), 'volume': float(kline_data['v'])}]).set_index('timestamp')
