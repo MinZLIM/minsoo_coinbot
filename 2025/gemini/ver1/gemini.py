@@ -24,12 +24,12 @@ except ImportError:
 # ==============================================================================
 # 사용자 설정 값
 # ==============================================================================
-API_KEY = "YOUR_BINANCE_API_KEY"
-API_SECRET = "YOUR_BINANCE_API_SECRET"
+API_KEY = ""
+API_SECRET = ""
 SIMULATION_MODE = False
 LEVERAGE = 10
 MAX_OPEN_POSITIONS = 4
-TOP_N_SYMBOLS = 30
+TOP_N_SYMBOLS = 50
 TIMEFRAME = '15m'
 TIMEFRAME_MINUTES = 15
 TARGET_ASSET = 'USDT'
@@ -466,12 +466,27 @@ def sync_positions_with_exchange():
 
 def sync_state_periodically(interval_seconds):
     global shutdown_requested
-    op_logger.info(f"REST Sync thread started. Interval: {interval_seconds}s.")
+    # 함수 시작 시 전달받은 interval_seconds 값 확인
+    op_logger.info(f"REST Sync thread started. Received interval: {interval_seconds} seconds.") # <<<--- 로그 추가
+
     while not shutdown_requested:
         try:
-            for _ in range(interval_seconds):
-                 if shutdown_requested: break; time.sleep(1)
-            if not shutdown_requested: sync_positions_with_exchange()
+            op_logger.info(f"REST Sync thread: Starting wait for {interval_seconds} seconds...") # <<<--- 로그 추가
+            wait_start_time = time.time() # 시작 시간 기록
+            for i in range(interval_seconds):
+                 if shutdown_requested: break
+                 # 루프 중간 상태 로깅 (너무 자주 찍히면 성능 저하 우려, 간헐적으로)
+                 if (i + 1) % 60 == 0: # 예: 1분마다 로그
+                     op_logger.debug(f"REST Sync thread: Waited {i+1}/{interval_seconds} seconds...")
+                 time.sleep(1)
+
+            wait_end_time = time.time() # 종료 시간 기록
+            actual_wait_time = wait_end_time - wait_start_time
+            op_logger.info(f"REST Sync thread: Wait finished. Actual wait time: {actual_wait_time:.2f} seconds.") # <<<--- 로그 추가
+
+            if not shutdown_requested:
+                sync_positions_with_exchange() # 실제 동기화 실행
+
         except Exception as e: op_logger.error(f"Error in REST sync loop: {e}", exc_info=True); time.sleep(60)
     op_logger.info("REST Sync thread finished.")
 
@@ -483,43 +498,58 @@ def update_top_symbols_periodically(interval_seconds):
     op_logger.info(f"Symbol Update thread started. Interval: {interval_seconds}s.")
     while not shutdown_requested:
         try:
-            for _ in range(interval_seconds):
-                 if shutdown_requested: break; time.sleep(1)
-            if shutdown_requested: break
-            if not kline_websocket_running or not kline_wsapp or not kline_wsapp.sock or not kline_wsapp.sock.connected: op_logger.warning("[Symbol Update] K-line WS not ready."); continue
+            # ---> 수정된 대기 로직 (time.time() 사용) <---
+            op_logger.debug(f"Symbol Update thread: Starting wait for {interval_seconds} seconds...")
+            wait_until = time.time() + interval_seconds
+            while time.time() < wait_until and not shutdown_requested:
+                # 1초 간격으로 종료 플래그 확인하며 대기
+                time.sleep(1)
+            # ---> 여기까지 수정 <---
 
+            if shutdown_requested: break # 대기 중 종료 요청 받으면 루프 탈출
+
+            # 웹소켓 상태 확인
+            if not kline_websocket_running or not kline_wsapp or not kline_wsapp.sock or not kline_wsapp.sock.connected:
+                 op_logger.warning("[Symbol Update] K-line WS not ready. Skipping update cycle.")
+                 continue # 다음 루프로 (다시 대기 시작)
+
+            # --- 여기부터는 기존 심볼 업데이트 로직 ---
             op_logger.info("[Symbol Update] Starting symbol update...")
+            # ... (get_top_volume_symbols, 구독 비교, SUBSCRIBE/UNSUBSCRIBE 등) ...
+            # (이 부분은 이전 코드와 동일)
+
             new_sym_ccxt = get_top_volume_symbols(TOP_N_SYMBOLS) # 재시도 내장됨
             if not new_sym_ccxt: op_logger.warning("[Symbol Update] Failed fetch new symbols."); continue
             new_sym_ws = {s.replace('/','') for s in new_sym_ccxt}
             with subscribed_symbols_lock: current_subs = subscribed_symbols.copy()
             to_add = new_sym_ws - current_subs; to_remove = current_subs - new_sym_ws
 
-            # 제거
+            # 제거 로직 ... (이전 코드와 동일)
             if to_remove:
                 op_logger.info(f"[Symbol Update] Removing: {to_remove}")
                 streams = [f"{s.lower()}@kline_{TIMEFRAME}" for s in to_remove]
                 if streams:
                     msg = {"method": "UNSUBSCRIBE", "params": streams, "id": int(time.time())}
-                    try: kline_wsapp.send(json.dumps(msg)); op_logger.info(f"[Symbol Update] Sent UNSUB.")
+                    try:
+                         if kline_wsapp and kline_wsapp.sock and kline_wsapp.sock.connected: # 추가 확인
+                              kline_wsapp.send(json.dumps(msg)); op_logger.info(f"[Symbol Update] Sent UNSUB.")
+                         else: op_logger.warning("[Symbol Update] K-line WS gone before UNSUB.")
                     except Exception as e: op_logger.error(f"[Symbol Update] Failed send UNSUB: {e}")
                 with subscribed_symbols_lock: subscribed_symbols -= to_remove
                 with data_lock: removed = sum(1 for s in to_remove if historical_data.pop(s, None))
                 op_logger.info(f"[Symbol Update] Removed data for {removed} symbols.")
-                # 제거된 심볼 포지션 강제 종료 안 함 (동기화 로직에 맡김)
 
-            # 추가
+            # 추가 로직 ... (이전 코드와 동일, 단 with 수정 적용된 버전)
             if to_add:
                 op_logger.info(f"[Symbol Update] Adding: {to_add}")
                 fetched, errors, added_to_data = 0, 0, set()
                 for symbol_ws in to_add:
-                    ccxt_s = symbol_ws.replace('USDT','/USDT')
-                    df = fetch_initial_ohlcv(ccxt_s, TIMEFRAME, limit=max(INITIAL_CANDLE_FETCH_LIMIT, STOCH_RSI_PERIOD*2)) # 재시도 내장됨
+                    if shutdown_requested: break
+                    ccxt_s = symbol_ws.replace('USDT','/USDT'); df = fetch_initial_ohlcv(ccxt_s, TIMEFRAME, limit=max(INITIAL_CANDLE_FETCH_LIMIT, STOCH_RSI_PERIOD*2))
                     if df is not None and not df.empty:
                          with data_lock: historical_data[symbol_ws] = df
                          fetched += 1; added_to_data.add(symbol_ws)
                     else: errors += 1
-                    if shutdown_requested: break
                     time.sleep(0.3)
                 op_logger.info(f"[Symbol Update] Fetched data for {fetched} new symbols ({errors} err).")
                 if added_to_data:
@@ -527,16 +557,17 @@ def update_top_symbols_periodically(interval_seconds):
                     msg = {"method": "SUBSCRIBE", "params": streams, "id": int(time.time())}
                     try:
                         if kline_wsapp and kline_wsapp.sock and kline_wsapp.sock.connected:
-                             kline_wsapp.send(json.dumps(msg)); op_logger.info(f"[Symbol Update] Sent SUB for {len(added_to_data)}.")
+                             kline_wsapp.send(json.dumps(msg))
+                             op_logger.info(f"[Symbol Update] Sent SUB for {len(added_to_data)}.")
                              with subscribed_symbols_lock: subscribed_symbols.update(added_to_data)
                         else: op_logger.warning("[Symbol Update] K-line WS disconnected before SUB.")
                     except Exception as e: op_logger.error(f"[Symbol Update] Failed send SUB: {e}")
 
             with subscribed_symbols_lock: current_count = len(subscribed_symbols)
             op_logger.info(f"[Symbol Update] Finished. Subscribed: {current_count}")
-        except Exception as e: op_logger.error(f"Error in symbol update loop: {e}", exc_info=True); time.sleep(60)
-    op_logger.info("Symbol Update thread finished.")
 
+        except Exception as e: op_logger.error(f"Error in symbol update loop: {e}", exc_info=True); time.sleep(60) # 에러 시 잠시 대기
+    op_logger.info("Symbol Update thread finished.")
 
 # ==============================================================================
 # 웹소켓 처리 로직 (K-line)
