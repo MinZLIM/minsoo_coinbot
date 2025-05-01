@@ -1626,17 +1626,9 @@ if __name__ == "__main__":
         else: final_balance = f"{final_balance:.2f}"
 
         with stats_lock: final_trades, final_wins = total_trades, winning_trades
-<<<<<<< HEAD
         final_win_rate = (final_wins / final_trades * 100) if final_trades > 0 else 0.0
 
         final_msg = f"Final Balance:{final_balance} {TARGET_ASSET}, Total Trades:{final_trades}, Winning Trades:{final_wins}(UDS Based), Win Rate:{final_win_rate:.2f}%"
         op_logger.info(final_msg)
         asset_logger.info(final_msg)
         op_logger.info("Real trading bot shutdown complete.")
-=======
-        final_win_rate = (final_wins / final_trades * 100) if final_trades > 0 else 0
-        final_msg = f"Final Balance:{final_balance:.2f}, Trades:{final_trades}, Wins:{final_wins}(Inaccurate), WinRate:{final_win_rate:.2f}%"
-        op_logger.info(final_msg); asset_logger.info(final_msg)
-        op_logger.info("Real trading bot shutdown complete.")
-        
->>>>>>> origin/main
