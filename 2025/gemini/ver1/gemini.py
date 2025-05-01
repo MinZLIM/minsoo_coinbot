@@ -638,3 +638,4 @@ if __name__ == "__main__":
         final_msg = f"Final Balance:{final_balance:.2f}, Trades:{final_trades}, Wins:{final_wins}(Inaccurate), WinRate:{final_win_rate:.2f}%"
         op_logger.info(final_msg); asset_logger.info(final_msg)
         op_logger.info("Real trading bot shutdown complete.")
+        
