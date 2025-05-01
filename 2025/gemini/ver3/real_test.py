@@ -23,7 +23,7 @@ except ImportError:
     from pytz import timezone as ZoneInfo # Fallback for older Python
 
 # ==============================================================================
-# 사용자 설정 값 (*** 재연결 변수 정의 추가됨 ***)
+# 사용자 설정 값
 # ==============================================================================
 # !!! 실제 거래용 API 키 및 시크릿 키 !!!
 API_KEY = "YOUR_BINANCE_API_KEY"
@@ -58,8 +58,8 @@ TP_UPDATE_THRESHOLD_PERCENT = 0.1
 
 # 동기화 및 재연결 설정
 SYNC_INTERVAL_MINUTES = 5
-RECONNECT_DELAY_SECONDS = 15        # <<< --- 재연결 변수 정의 추가됨
-MAX_RECONNECT_ATTEMPTS = 10         # <<< --- 재연결 변수 정의 추가됨 (None이면 무한)
+RECONNECT_DELAY_SECONDS = 15
+MAX_RECONNECT_ATTEMPTS = 10
 
 # 수수료 설정
 FEE_RATE = 0.0005
@@ -84,8 +84,8 @@ log_dir = os.path.dirname(os.path.abspath(__file__))
 # 운영 로그
 op_logger = logging.getLogger('operation')
 op_logger.setLevel(logging.INFO)
-op_formatter = logging.Formatter('%(asctime)s - %(levelname)s - [REAL_WS_FINAL_V2] - %(message)s') # Prefix 변경
-op_handler = logging.FileHandler(os.path.join(log_dir, 'operation_real_ws_final_v2.log')) # 파일명 변경
+op_formatter = logging.Formatter('%(asctime)s - %(levelname)s - [REAL_WS_FINAL_V3] - %(message)s') # Prefix 변경
+op_handler = logging.FileHandler(os.path.join(log_dir, 'operation_real_ws_final_v3.log')) # 파일명 변경
 op_handler.setFormatter(op_formatter)
 op_logger.addHandler(op_handler)
 op_logger.addHandler(logging.StreamHandler())
@@ -93,18 +93,16 @@ op_logger.addHandler(logging.StreamHandler())
 # 매매 로그, 자산 로그 설정 (이전과 동일)
 trade_logger = logging.getLogger('trade')
 trade_logger.setLevel(logging.INFO)
-trade_formatter = logging.Formatter('%(asctime)s - [REAL_WS_FINAL_V2] - %(message)s')
-trade_handler = logging.FileHandler(os.path.join(log_dir, 'trade_real_ws_final_v2.log'))
+trade_formatter = logging.Formatter('%(asctime)s - [REAL_WS_FINAL_V3] - %(message)s')
+trade_handler = logging.FileHandler(os.path.join(log_dir, 'trade_real_ws_final_v3.log'))
 trade_handler.setFormatter(trade_formatter)
 trade_logger.addHandler(trade_handler)
-
 asset_logger = logging.getLogger('asset')
 asset_logger.setLevel(logging.INFO)
-asset_formatter = logging.Formatter('%(asctime)s - [REAL_WS_FINAL_V2] - %(message)s')
-asset_handler = logging.FileHandler(os.path.join(log_dir, 'asset_real_ws_final_v2.log'))
+asset_formatter = logging.Formatter('%(asctime)s - [REAL_WS_FINAL_V3] - %(message)s')
+asset_handler = logging.FileHandler(os.path.join(log_dir, 'asset_real_ws_final_v3.log'))
 asset_handler.setFormatter(asset_formatter)
 asset_logger.addHandler(asset_handler)
-
 
 # ==============================================================================
 # 전역 변수 및 동기화 객체
@@ -119,6 +117,7 @@ last_asset_log_time = datetime.now(UTC)
 websocket_running = True
 subscribed_symbols = set()
 binance_rest = None
+wsapp = None
 
 # ==============================================================================
 # API 및 데이터 처리 함수
@@ -127,7 +126,6 @@ binance_rest = None
 def initialize_binance_rest():
     global binance_rest; op_logger.info("Initializing CCXT REST...")
     try:
-        # 옵션 추가: ccxt 경고 메시지 끄기 (필요 시)
         options = {'defaultType': 'future', 'adjustForTimeDifference': True, "warnOnFetchOpenOrdersWithoutSymbol": False}
         binance_rest = ccxt.binance({'apiKey': API_KEY, 'secret': API_SECRET, 'enableRateLimit': True,'options': options});
         binance_rest.load_markets(); op_logger.info("CCXT REST initialized."); return True
@@ -139,7 +137,7 @@ def get_current_balance(asset=TARGET_ASSET):
     try: balance = binance_rest.fetch_balance(params={'type': 'future'}); available = balance['free'].get(asset, 0.0); return float(available) if available else 0.0
     except Exception as e: op_logger.error(f"Error fetching balance: {e}"); return 0.0
 
-def get_top_volume_symbols(n=TOP_N_SYMBOLS): # n=30
+def get_top_volume_symbols(n=TOP_N_SYMBOLS):
     if not binance_rest: return []
     op_logger.info(f"Fetching top {n} symbols...")
     try:
@@ -168,7 +166,7 @@ def calculate_indicators(df):
         return df_copy
     except Exception as e: op_logger.error(f"Indicator Calc Error: {e}"); return None
 
-# --- 격리 마진 설정 (*** 최종 수정된 버전 ***) ---
+# --- 격리 마진 설정 (최종 수정본) ---
 def set_isolated_margin(symbol_ccxt, leverage):
     if not binance_rest:
         op_logger.error(f"[{symbol_ccxt}] CCXT instance not ready for margin setting.")
@@ -180,9 +178,8 @@ def set_isolated_margin(symbol_ccxt, leverage):
     except ccxt.ExchangeError as e:
         error_msg = str(e)
         if 'Margin type already set' in error_msg or 'No need to change margin type' in error_msg:
-             # !!! 올바른 들여쓰기 적용됨 !!!
              op_logger.warning(f"{symbol_ccxt} already ISOLATED.")
-             try: # 레버리지만 다시 시도
+             try:
                   binance_rest.set_leverage(leverage, symbol_ccxt, params={})
                   op_logger.info(f"Set Leverage {leverage}x OK (was isolated).")
                   return True
@@ -215,8 +212,10 @@ def place_market_order_real(symbol_ccxt, side, amount, current_price):
     except ccxt.ExchangeError as e: op_logger.error(f"[ORDER FAILED] Exchange error {symbol_ccxt}: {e}"); return None
     except Exception as e: op_logger.error(f"[ORDER FAILED] Unexpected error {symbol_ccxt}: {e}", exc_info=True); return None
 
+# --- SL/TP 주문 함수 (첫 라인 수정됨) ---
 def place_stop_market_order(symbol_ccxt, side, stop_price, amount):
-    if not binance_rest: op_logger.error(f"[{symbol_ccxt}] CCXT needed for SL."); return None; op_logger.info(f"[REAL SL ORDER] Attempt {side.upper()} {amount:.8f} {symbol_ccxt} if price hits {stop_price:.4f}")
+    if not binance_rest: op_logger.error(f"[{symbol_ccxt}] CCXT needed for SL."); return None
+    op_logger.info(f"[REAL SL ORDER] Attempt {side.upper()} {amount:.8f} {symbol_ccxt} if price hits {stop_price:.4f}")
     try:
         market = binance_rest.market(symbol_ccxt); adjusted_amount = binance_rest.amount_to_precision(symbol_ccxt, amount); stop_price_str = binance_rest.price_to_precision(symbol_ccxt, stop_price)
         if float(adjusted_amount) <= 0: op_logger.error(f"[{symbol_ccxt}] SL Adj amount <= 0."); return None
@@ -226,7 +225,8 @@ def place_stop_market_order(symbol_ccxt, side, stop_price, amount):
     except Exception as e: op_logger.error(f"[SL ORDER FAILED] Unexp error {symbol_ccxt}: {e}", exc_info=True); return None
 
 def place_take_profit_market_order(symbol_ccxt, side, stop_price, amount):
-    if not binance_rest: op_logger.error(f"[{symbol_ccxt}] CCXT needed for TP."); return None; op_logger.info(f"[REAL TP ORDER] Attempt {side.upper()} {amount:.8f} {symbol_ccxt} if price hits {stop_price:.4f}")
+    if not binance_rest: op_logger.error(f"[{symbol_ccxt}] CCXT needed for TP."); return None
+    op_logger.info(f"[REAL TP ORDER] Attempt {side.upper()} {amount:.8f} {symbol_ccxt} if price hits {stop_price:.4f}")
     try:
         market = binance_rest.market(symbol_ccxt); adjusted_amount = binance_rest.amount_to_precision(symbol_ccxt, amount); stop_price_str = binance_rest.price_to_precision(symbol_ccxt, stop_price)
         if float(adjusted_amount) <= 0: op_logger.error(f"[{symbol_ccxt}] TP Adj amount <= 0."); return None
@@ -280,7 +280,7 @@ def sync_positions_with_exchange():
         symbols_to_fetch_orders = set()
         with real_positions_lock: symbols_to_fetch_orders.update(real_positions.keys())
         symbols_to_fetch_orders.update(subscribed_symbols)
-        for symbol_ws in symbols_to_fetch_orders:
+        for symbol_ws in list(symbols_to_fetch_orders):
             symbol_ccxt = symbol_ws.replace('USDT','/USDT')
             try:
                 orders = binance_rest.fetch_open_orders(symbol=symbol_ccxt)
@@ -291,13 +291,24 @@ def sync_positions_with_exchange():
         op_logger.info(f"[SYNC] Fetched total {len(all_open_orders)} open orders.")
         # *** 조회 방식 변경 완료 ***
 
-        current_exchange_pos_dict = {}
+        # *** 포지션 파싱 로직 수정됨 (올바른 들여쓰기) ***
+        current_exchange_pos_dict = {} # {symbol_ws: info}
         for pos in exchange_pos:
             try:
-                amount = float(pos.get('info', {}).get('positionAmt', 0));
-                if abs(amount) > 1e-9: symbol_ccxt = pos.get('symbol');
-                if symbol_ccxt: symbol_ws = symbol_ccxt.replace('/USDT', 'USDT'); current_exchange_pos_dict[symbol_ws] = {'side': 'long' if amount > 0 else 'short', 'amount': abs(amount), 'entry_price': float(pos.get('entryPrice', 0)), 'symbol_ccxt': symbol_ccxt}
-            except Exception as parse_err: op_logger.error(f"[SYNC] Error parsing pos data: {pos.get('info')}, Err: {parse_err}")
+                amount = float(pos.get('info', {}).get('positionAmt', 0))
+                if abs(amount) > 1e-9: # 유효한 포지션 수량 확인
+                    symbol_ccxt = pos.get('symbol')
+                    if symbol_ccxt: # 심볼 이름 확인
+                        symbol_ws = symbol_ccxt.replace('/USDT', 'USDT')
+                        current_exchange_pos_dict[symbol_ws] = {
+                            'side': 'long' if amount > 0 else 'short',
+                            'amount': abs(amount),
+                            'entry_price': float(pos.get('entryPrice', 0)),
+                            'symbol_ccxt': symbol_ccxt
+                        }
+            except Exception as parse_err:
+                op_logger.error(f"[SYNC] Error parsing position data: {pos.get('info')}, Err: {parse_err}")
+        # *** 파싱 로직 수정 완료 ***
 
         open_sl_tp_order_ids = {o['id'] for o in all_open_orders if o.get('type') in ['STOP_MARKET', 'TAKE_PROFIT_MARKET'] and o.get('status') == 'open'}
         open_orders_by_symbol = {}
@@ -349,7 +360,7 @@ def sync_positions_with_exchange():
     except (ExchangeNotAvailable, OnMaintenance) as e: op_logger.warning(f"[SYNC] Exchange unavailable: {e}."); return
     except Exception as e: op_logger.error(f"[SYNC] Error: {e}", exc_info=True); return
 
-# *** sync_state_periodically 함수 수정됨 (global 선언 추가, 들여쓰기 수정) ***
+# *** sync_state_periodically 함수 (수정된 버전) ***
 def sync_state_periodically(interval_seconds):
     global websocket_running # <<< --- global 선언 추가됨
     op_logger.info(f"State synchronization thread starting. Interval: {interval_seconds} seconds.")
@@ -364,10 +375,10 @@ def sync_state_periodically(interval_seconds):
     op_logger.info("State synchronization thread finished.")
 
 # ==============================================================================
-# 웹소켓 처리 로직 (TP 업데이트, 타임스탬프 처리, SL/TP 롤백 강화)
+# 웹소켓 처리 로직
 # ==============================================================================
 def update_historical_data(symbol_ws, kline_data):
-    global historical_data 
+    global historical_data
     with data_lock:
         if symbol_ws not in historical_data: return False
         df = historical_data[symbol_ws]; kline_start_time = pd.to_datetime(kline_data['t'], unit='ms', utc=True)
@@ -402,7 +413,7 @@ def process_kline_message(symbol_ws, kline_data):
     indicator_df = calculate_indicators(current_df)
     if indicator_df is None or indicator_df.empty: return
 
-    try: # 지표 추출
+    try:
         last_candle = indicator_df.iloc[-1]; current_price = last_candle['close']
         stoch_k = last_candle.get('STOCHk', np.nan); stoch_d = last_candle.get('STOCHd', np.nan)
         bbl = last_candle.get('BBL', np.nan); bbu = last_candle.get('BBU', np.nan)
@@ -427,7 +438,6 @@ def process_kline_message(symbol_ws, kline_data):
 
         if time_since_entry < timedelta(minutes=POSITION_MONITORING_DELAY_MINUTES): continue
 
-        # TP 업데이트 로직 (현재 메시지 심볼에 대해서만)
         if open_symbol == symbol_ws and tp_order_id and current_tp_price:
             new_tp_target = bbu if side == 'long' else bbl
             if new_tp_target and new_tp_target > 0:
@@ -446,7 +456,6 @@ def process_kline_message(symbol_ws, kline_data):
             if check_symbol_in_blacklist(symbol_ws): return
             if current_open_count >= MAX_OPEN_POSITIONS: return
 
-            # --- 진입 조건 체크 ---
             target_side, stop_loss_price_target, take_profit_price_target = None, None, None
             entry_trigger_price = current_price
             long_stoch_cond = stoch_k <= STOCH_RSI_LONG_ENTRY_THRESH and stoch_d <= STOCH_RSI_LONG_ENTRY_THRESH and stoch_k > stoch_d
@@ -456,8 +465,8 @@ def process_kline_message(symbol_ws, kline_data):
 
             if target_side and take_profit_price_target is not None:
                 entry_in_progress[symbol_ws] = True
-                try: # --- Start of entry process ---
-                    available_balance = get_current_balance() # <<<--- 잔고 확인은 신호 확인 후
+                try:
+                    available_balance = get_current_balance()
                     if available_balance <= 0: raise Exception("Zero balance")
                     dynamic_margin_percentage = 0.0
                     if current_open_count == 0: dynamic_margin_percentage = 0.25
@@ -490,7 +499,7 @@ def process_kline_message(symbol_ws, kline_data):
 
                     entry_price = entry_order_result.get('average', entry_trigger_price)
                     filled_amount = entry_order_result.get('filled')
-                    ts_ms = entry_order_result.get('timestamp'); # *** 타임스탬프 처리 수정됨 ***
+                    ts_ms = entry_order_result.get('timestamp');
                     if not ts_ms: ts_ms = int(datetime.now(UTC).timestamp() * 1000)
                     entry_time_utc = datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
 
@@ -513,14 +522,13 @@ def process_kline_message(symbol_ws, kline_data):
                         time.sleep(0.1)
                         if final_tp_price_str and adjusted_filled_amount > 0: tp_order_id = place_take_profit_market_order(symbol_ccxt, tp_side, float(final_tp_price_str), adjusted_filled_amount)
 
-                        if sl_order_id is None or tp_order_id is None: raise Exception(f"SL ({sl_order_id}) or TP ({tp_order_id}) order failed.")
+                        if sl_order_id is None or tp_order_id is None: raise Exception(f"SL ({sl_order_id}) or TP ({tp_order_id}) failed.")
                     except Exception as pe: # SL/TP 실패 시 롤백
                         op_logger.error(f"[{symbol_ws}] Error placing SL/TP: {pe}. ROLLING BACK ENTRY!")
                         if entry_order_result: place_market_order_real(symbol_ccxt, 'sell' if target_side == 'buy' else 'buy', filled_amount, entry_price)
                         cancel_order(symbol_ccxt, sl_order_id); cancel_order(symbol_ccxt, tp_order_id)
                         raise pe
 
-                    # 포지션 정보 저장
                     current_open_count_final = len(real_positions) # Lock은 잡혀 있음
                     if current_open_count_final < MAX_OPEN_POSITIONS:
                         real_positions[symbol_ws] = {'side': 'long' if target_side == 'buy' else 'short', 'entry_price': entry_price, 'amount': float(filled_amount), 'entry_time': entry_time_utc, 'sl_order_id': sl_order_id, 'tp_order_id': tp_order_id, 'current_tp_price': float(final_tp_price_str) if final_tp_price_str else None}
@@ -554,11 +562,9 @@ def on_message(wsapp, message):
 
 def on_error(wsapp, error): op_logger.error(f"WebSocket Error: {error}")
 def on_close(wsapp, close_status_code, close_msg):
-    # 재연결 로직 위해 websocket_running = False 설정 안 함 (메인 루프에서 관리)
     op_logger.info(f"WebSocket closed. Code:{close_status_code}, Msg:{close_msg}")
 
 def on_open(wsapp, symbols_ws, timeframe):
-    # ... (이전과 동일) ...
     global subscribed_symbols, historical_data; op_logger.info("WebSocket connection opened."); op_logger.info(f"Subscribing to {len(symbols_ws)} streams ({timeframe})...")
     streams = [f"{s.lower()}@kline_{timeframe}" for s in symbols_ws]; subscribe_message = {"method": "SUBSCRIBE", "params": streams, "id": 1}
     wsapp.send(json.dumps(subscribe_message)); time.sleep(1); subscribed_symbols = set(symbols_ws); op_logger.info("Subscription message sent.")
@@ -571,9 +577,8 @@ def on_open(wsapp, symbols_ws, timeframe):
     op_logger.info(f"Initial data fetch complete ({len(historical_data)} OK, {fetch_errors} errors).")
     print("-" * 80 + "\nWebSocket connected. Listening for REAL TRADING signals...\n" + "-" * 80)
 
-
 # ==============================================================================
-# 메인 실행 로직 (재연결 로직 포함)
+# 메인 실행 로직 (재연결 로직, wsapp 초기화 수정됨)
 # ==============================================================================
 if __name__ == "__main__":
     start_time_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -582,7 +587,7 @@ if __name__ == "__main__":
     if SIMULATION_MODE: op_logger.error("Set SIMULATION_MODE to False."); exit()
     if not API_KEY or not API_SECRET or API_KEY == "YOUR_BINANCE_API_KEY": op_logger.error("API Key/Secret needed!"); exit()
 
-    op_logger.warning("="*30 + " REAL TRADING MODE ACTIVE - Sync + Reconnect V2 " + "="*30) # 제목 수정
+    op_logger.warning("="*30 + " REAL TRADING MODE ACTIVE - Final Check V2 " + "="*30)
     op_logger.warning("!!! Entry: Candle Close + Stoch | Exit: SL/TP Orders (TP Updated) OR Stoch Cross !!!")
     op_logger.warning(f"MaxPos:{MAX_OPEN_POSITIONS}, Stoch(P:{STOCH_RSI_PERIOD},K:{STOCH_RSI_K},D:{STOCH_RSI_D}) EntryThresh:{STOCH_RSI_LONG_ENTRY_THRESH}/{STOCH_RSI_SHORT_ENTRY_THRESH}")
     op_logger.warning("!!! MONITOR CLOSELY AND USE EXTREME CAUTION !!!")
@@ -593,18 +598,19 @@ if __name__ == "__main__":
     if not initialize_binance_rest(): op_logger.error("Exiting due to REST API failure."); exit()
 
     op_logger.info("Running initial state synchronization...")
-    sync_positions_with_exchange() # <<< --- 시작 시 동기화 호출
+    sync_positions_with_exchange()
     op_logger.info("Initial sync complete.")
 
     sync_thread = Thread(target=sync_state_periodically, args=(SYNC_INTERVAL_MINUTES * 60,), daemon=True)
-    sync_thread.start() # <<< --- 주기적 동기화 쓰레드 시작
+    sync_thread.start()
 
     top_symbols_ccxt = get_top_volume_symbols(TOP_N_SYMBOLS)
     if not top_symbols_ccxt: op_logger.error("Could not fetch top symbols."); exit()
     top_symbols_ws = [s.replace('/', '') for s in top_symbols_ccxt]
 
     reconnect_attempts = 0
-    while websocket_running: # <<< --- websocket_running 플래그로 루프 제어
+    wsapp = None # <<< --- wsapp None으로 초기화
+    while websocket_running:
         if reconnect_attempts > 0:
             delay = min(RECONNECT_DELAY_SECONDS * (2**(reconnect_attempts-1)), 300)
             op_logger.info(f"Attempting reconnect #{reconnect_attempts} in {delay} seconds...")
@@ -612,47 +618,47 @@ if __name__ == "__main__":
 
         if MAX_RECONNECT_ATTEMPTS is not None and reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
             op_logger.error("Maximum reconnect attempts reached. Stopping bot.")
-            websocket_running = False # 쓰레드 및 루프 종료 플래그
+            websocket_running = False
             break
 
         ws_url = f"wss://fstream.binance.com/stream?streams={'/'.join([f'{s.lower()}@kline_{TIMEFRAME}' for s in top_symbols_ws])}"
         op_logger.info(f"Connecting/Reconnecting to WebSocket...")
 
         on_open_with_args = partial(on_open, symbols_ws=top_symbols_ws, timeframe=TIMEFRAME)
+        # *** 전역 변수 wsapp에 할당 ***
         wsapp = websocket.WebSocketApp(ws_url, on_open=on_open_with_args, on_message=on_message, on_error=on_error, on_close=on_close)
 
         try:
-            wsapp.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}) # KeyboardInterrupt 외에는 여기서 빠져나오면 연결 끊김 의미
+            wsapp.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
             op_logger.warning("WebSocket run_forever loop exited.")
-            # websocket_running 플래그는 on_close에서 변경되지 않으므로,
-            # KeyboardInterrupt가 아니면 연결 문제로 간주하고 재연결 시도
-            if websocket_running: # Ctrl+C로 종료된게 아니라면
-                 reconnect_attempts += 1
-            else: # Ctrl+C 등으로 websocket_running이 False가 되었다면 루프 종료
-                 break
+            if not websocket_running: op_logger.info("Stop signal received."); break
+            reconnect_attempts += 1
 
         except KeyboardInterrupt:
             op_logger.info("Keyboard interrupt detected. Stopping bot.")
             websocket_running = False
-            if wsapp.sock and wsapp.sock.connected: wsapp.close()
-            # break 는 finally 블록 이후에 어차피 루프 조건(websocket_running)에 의해 종료됨
+            # if wsapp and wsapp.sock and wsapp.sock.connected: wsapp.close() # finally에서 처리
+            break
         except Exception as e:
             op_logger.error(f"Unhandled exception in WebSocket run_forever loop: {e}", exc_info=True)
-            reconnect_attempts += 1 # 예기치 않은 오류 시 재연결 시도
+            reconnect_attempts += 1
 
         op_logger.info("WebSocket connection attempt finished. Looping...")
-        # 명시적으로 websocket_running 체크 불필요 (while 조건에서 확인)
 
     # --- 최종 정리 ---
     op_logger.info("Shutting down...")
     if sync_thread.is_alive():
          op_logger.info("Waiting for sync thread to finish...")
-         sync_thread.join(timeout=5) # 최대 5초 대기
+         sync_thread.join(timeout=5)
+
+    # *** finally 블록 수정: wsapp None 체크 추가 ***
+    if wsapp and wsapp.sock and wsapp.sock.connected:
+        op_logger.info("Closing WebSocket connection explicitly...")
+        wsapp.close()
 
     op_logger.info("Attempting to fetch final balance...")
     time.sleep(1)
     final_balance = get_current_balance()
-    # TODO: Consider canceling all remaining open orders on shutdown
     op_logger.info("Attempting to cancel remaining open orders...")
     try:
         open_orders = binance_rest.fetch_open_orders()
