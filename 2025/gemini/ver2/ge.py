@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 # === 최종 버전 V2 (REST 기반 + 자동 심볼 업데이트 + K-line 재연결 + 강화된 동기화 + 오류 수정) ===
-# === 수정: 진입 로직 StochRSI K/D 교차(21,21,10,10) + 레벨 조건 + 8시간봉 방향성 필터 + 수수료 체크 / TP 로직 BBands 동적 업데이트 유지 ===
-# === 수정: 최소 잔고 체크 로직 제거 ===
+# === 수정: 5m봉, StochRSI(14,14,3,3) K/D 교차(10/90) + CCI 필터(-100/100) + 수수료 체크 / TP 로직 BBands 동적 업데이트 유지 ===
+# === 수정: 8h 추세 필터, 최소 잔고 체크, 블랙리스트 로직 제거 ===
 # === 수정: 동기화 로직 심볼 형식 불일치 문제 수정 ===
+# === 수정: calculate_indicators 함수 CCI 컬럼 이름 문제 수정 ===
 
 
 # Imports
@@ -28,25 +29,30 @@ except ImportError:
     from pytz import timezone as ZoneInfo
 
 # ==============================================================================
-# 사용자 설정 값 (User Settings)
+# 사용자 설정 값 (User Settings) - 수정됨
 # ==============================================================================
-API_KEY = "YOUR_BINANCE_API_KEY" # 실제 API 키로 변경하세요
-API_SECRET = "YOUR_BINANCE_API_SECRET" # 실제 API 시크릿으로 변경하세요
+API_KEY = "" # 실제 API 키로 변경하세요
+API_SECRET = "" # 실제 API 시크릿으로 변경하세요
 SIMULATION_MODE = False # 실제 거래 시 False로 설정
 LEVERAGE = 10 # 레버리지 설정
 MAX_OPEN_POSITIONS = 4 # 최대 동시 진입 포지션 수
-TOP_N_SYMBOLS = 30 # 거래량 상위 N개 심볼 선택
-TIMEFRAME = '15m' # 사용할 캔들 시간봉
-TIMEFRAME_MINUTES = 15 # 시간봉 분 단위
+TOP_N_SYMBOLS = 50 # 거래량 상위 N개 심볼 선택 (50으로 변경)
+TIMEFRAME = '5m' # 사용할 캔들 시간봉 (5분봉으로 변경)
+TIMEFRAME_MINUTES = 5 # 시간봉 분 단위 (5분봉으로 변경)
 TARGET_ASSET = 'USDT' # 타겟 자산 (테더)
 
 # --- Stochastic RSI 설정 (사용자 요청 반영) ---
-STOCHRSI_LENGTH = 21
-STOCHRSI_RSI_LENGTH = 21
-STOCHRSI_K = 10
-STOCHRSI_D = 10
-STOCHRSI_OVERSOLD = 15 # 과매도 기준선 (교차 조건용)
-STOCHRSI_OVERBOUGHT = 85 # 과매수 기준선 (교차 조건용)
+STOCHRSI_LENGTH = 14 # (14로 변경)
+STOCHRSI_RSI_LENGTH = 14 # (14로 변경)
+STOCHRSI_K = 3 # (3으로 변경)
+STOCHRSI_D = 3 # (3으로 변경)
+STOCHRSI_OVERSOLD = 10 # 과매도 기준선 (10으로 변경)
+STOCHRSI_OVERBOUGHT = 90 # 과매수 기준선 (90으로 변경)
+
+# --- CCI 설정 (추가) ---
+CCI_LENGTH = 20 # CCI 기간 설정 (기본값 20)
+CCI_BUY_THRESHOLD = -100 # CCI 롱 진입 필터 임계값
+CCI_SELL_THRESHOLD = 100 # CCI 숏 진입 필터 임계값
 
 # --- Bollinger Bands 설정 (동적 TP용) ---
 BBANDS_PERIOD = 20 # 볼린저 밴드 기간
@@ -58,7 +64,7 @@ SHORT_STOP_LOSS_FACTOR = 1.01 # 숏 포지션 손절 비율 (진입가 * 1.01)
 
 # --- 기타 설정 ---
 POSITION_MONITORING_DELAY_MINUTES = 5 # 포지션 진입 후 TP 업데이트 시작까지 대기 시간(분)
-WHIPSAW_BLACKLIST_HOURS = 2 # 휩쏘 등으로 인한 블랙리스트 지속 시간(시간)
+# WHIPSAW_BLACKLIST_HOURS = 2 # 블랙리스트 제거
 TP_UPDATE_THRESHOLD_PERCENT = 0.1 # TP 업데이트를 위한 최소 가격 변동률 (%)
 REST_SYNC_INTERVAL_MINUTES = 5 # REST API 상태 동기화 주기(분)
 SYMBOL_UPDATE_INTERVAL_HOURS = 2 # 거래 대상 심볼 목록 업데이트 주기(시간)
@@ -76,7 +82,7 @@ pd.set_option('display.max_rows', None); pd.set_option('display.max_columns', No
 # ==============================================================================
 log_dir = os.path.dirname(os.path.abspath(__file__)) # 로그 파일 저장 디렉토리
 log_filename_base = "bot_log" # 로그 파일 기본 이름
-log_prefix = "[STOCHRSI_X_8H_BBTP_V2]" # 로그 메시지 접두사 (전략 및 수정사항 명시)
+log_prefix = "[5m_STOCHRSI_CCI_BBTP_V2_FIX]" # 로그 메시지 접두사 (전략 및 수정사항 명시)
 
 # 운영 로그 (Operation Log)
 op_logger = logging.getLogger('operation')
@@ -108,8 +114,8 @@ winning_trades = 0 # 승리 거래 횟수 (구현 필요 시 추가)
 stats_lock = Lock() # 통계 변수 접근 동기화를 위한 Lock
 historical_data = {} # 심볼별 과거 캔들 데이터 (딕셔너리: {symbol_ws: DataFrame})
 data_lock = Lock() # historical_data 접근 동기화를 위한 Lock
-blacklist = {} # 거래 금지 심볼 목록 (딕셔너리: {symbol_ws: expiry_time})
-blacklist_lock = Lock() # blacklist 접근 동기화를 위한 Lock
+# blacklist = {} # 블랙리스트 제거
+# blacklist_lock = Lock() # 블랙리스트 제거
 entry_in_progress = {} # 현재 진입 시도 중인 심볼 (딕셔너리: {symbol_ws: True})
 entry_lock = Lock() # entry_in_progress 접근 동기화를 위한 Lock
 last_asset_log_time = datetime.now(UTC) # 마지막 자산 로그 기록 시간
@@ -240,10 +246,11 @@ def fetch_ohlcv_data(symbol_ccxt, timeframe, limit):
 
 def fetch_initial_ohlcv(symbol_ccxt, timeframe=TIMEFRAME, limit=INITIAL_CANDLE_FETCH_LIMIT):
     """지정된 심볼의 초기 OHLCV 데이터를 조회하여 DataFrame으로 반환"""
-    # 지표 계산에 필요한 최소 캔들 수 계산 (StochRSI + BBands)
+    # 지표 계산에 필요한 최소 캔들 수 계산 (StochRSI + BBands + CCI)
     stochrsi_buffer = STOCHRSI_LENGTH + STOCHRSI_RSI_LENGTH + STOCHRSI_K + STOCHRSI_D + 50
     bbands_buffer = BBANDS_PERIOD + 50
-    actual_limit = max(limit, stochrsi_buffer, bbands_buffer) # 설정값과 필요값 중 가장 큰 값 사용
+    cci_buffer = CCI_LENGTH + 50
+    actual_limit = max(limit, stochrsi_buffer, bbands_buffer, cci_buffer) # 설정값과 필요값 중 가장 큰 값 사용
 
     ohlcv = fetch_ohlcv_data(symbol_ccxt, timeframe, actual_limit)
     if not ohlcv: return None
@@ -261,11 +268,12 @@ def fetch_initial_ohlcv(symbol_ccxt, timeframe=TIMEFRAME, limit=INITIAL_CANDLE_F
 
 
 def calculate_indicators(df):
-    """주어진 DataFrame에 기술적 지표(Stochastic RSI, Bollinger Bands)를 계산하여 추가"""
+    """주어진 DataFrame에 기술적 지표(Stochastic RSI, CCI, Bollinger Bands)를 계산하여 추가"""
     # 지표 계산에 필요한 최소 데이터 길이 확인
     stochrsi_req_len = STOCHRSI_LENGTH + STOCHRSI_RSI_LENGTH + 50
+    cci_req_len = CCI_LENGTH + 50
     bbands_req_len = BBANDS_PERIOD + 50
-    required_len = max(stochrsi_req_len, bbands_req_len) # 두 지표 중 더 긴 길이 요구
+    required_len = max(stochrsi_req_len, cci_req_len, bbands_req_len) # 세 지표 중 가장 긴 길이 요구
     if df is None or len(df) < required_len:
         op_logger.debug(f"Not enough data for indicators: Have {len(df) if df is not None else 0}, Need ~{required_len}")
         return None
@@ -276,6 +284,12 @@ def calculate_indicators(df):
         df_copy.ta.stochrsi(length=STOCHRSI_LENGTH, rsi_length=STOCHRSI_RSI_LENGTH, k=STOCHRSI_K, d=STOCHRSI_D, append=True)
         stoch_k_col = f'STOCHRSIk_{STOCHRSI_LENGTH}_{STOCHRSI_RSI_LENGTH}_{STOCHRSI_K}_{STOCHRSI_D}'
         stoch_d_col = f'STOCHRSId_{STOCHRSI_LENGTH}_{STOCHRSI_RSI_LENGTH}_{STOCHRSI_K}_{STOCHRSI_D}' # %D 컬럼 이름
+
+        # CCI 계산
+        # *** FIX: CCI 컬럼 이름 문제 수정 ***
+        # pandas-ta는 CCI 컬럼 이름에 상수를 포함시킴 (e.g., CCI_20_0.015)
+        df_copy.ta.cci(length=CCI_LENGTH, append=True)
+        cci_col = f'CCI_{CCI_LENGTH}_0.015' # 실제 생성되는 컬럼 이름으로 수정
 
         # Bollinger Bands 계산
         df_copy.ta.bbands(length=BBANDS_PERIOD, std=BBANDS_STDDEV, append=True)
@@ -291,14 +305,16 @@ def calculate_indicators(df):
              return None
         df_copy.rename(columns=existing_rename_map, inplace=True)
 
-        # 필요한 지표 컬럼 존재 여부 확인 (Stoch %K, %D, BBands L/U)
-        required_cols = [stoch_k_col, stoch_d_col, 'BBL', 'BBU'] # %D 컬럼 추가
+        # 필요한 지표 컬럼 존재 여부 확인 (Stoch %K, %D, CCI, BBands L/U)
+        required_cols = [stoch_k_col, stoch_d_col, cci_col, 'BBL', 'BBU'] # CCI 컬럼 이름 수정 반영
         if not all(col in df_copy.columns for col in required_cols):
             op_logger.warning(f"Required indicator columns missing. Needed: {required_cols}, Have: {df_copy.columns.tolist()}")
             return None
 
-        # 최근 2개 캔들의 Stoch %K, %D 값과 최근 1개 캔들의 BBands 값에 NaN이 있는지 확인
-        if len(df_copy) < 2 or df_copy[[stoch_k_col, stoch_d_col]].iloc[-2:].isnull().any().any() or df_copy[['BBL', 'BBU']].iloc[-1].isnull().any():
+        # 최근 2개 캔들의 Stoch %K, %D 값과 최근 1개 캔들의 CCI, BBands 값에 NaN이 있는지 확인
+        if len(df_copy) < 2 or \
+           df_copy[[stoch_k_col, stoch_d_col]].iloc[-2:].isnull().any().any() or \
+           df_copy[[cci_col, 'BBL', 'BBU']].iloc[-1].isnull().any():
             op_logger.debug(f"Latest or previous indicator values contain NaN.")
             return None
 
@@ -463,8 +479,13 @@ def place_take_profit_market_order(symbol_ccxt, side, stop_price, amount):
         # 주문 정보 반환
         return {'id': oid, 'clientOrderId': coid}
     except ccxt.ExchangeError as e: # 거래소 오류
-        op_logger.error(f"[TP FAILED] Exchange error placing take profit market order for {symbol_ccxt}: {e}")
-        return None
+        # 즉시 발동 오류는 경고로 처리
+        if e.code == -2021:
+             op_logger.warning(f"[TP WARNING] Could not place TP for {symbol_ccxt}, order would immediately trigger: {e}")
+             return None # TP 주문 생성 실패
+        else:
+            op_logger.error(f"[TP FAILED] Exchange error placing take profit market order for {symbol_ccxt}: {e}")
+            return None
     except (RequestTimeout, ExchangeNotAvailable, OnMaintenance) as e: # 네트워크/거래소 일시 오류
         op_logger.warning(f"[TP FAILED] Network/Exchange issue placing take profit market order for {symbol_ccxt}: {e}")
         return None
@@ -537,28 +558,10 @@ def cancel_open_orders_for_symbol(symbol_ccxt):
     op_logger.info(f"Finished cancellation attempt for {symbol_ccxt}. Cancelled {cancelled_count}/{len(open_orders)} orders.")
     return success
 
-def check_symbol_in_blacklist(symbol_ws):
-    """주어진 심볼이 블랙리스트에 있는지, 유효기간이 남았는지 확인"""
-    with blacklist_lock: # Lock으로 보호
-        expiry = blacklist.get(symbol_ws)
-    if expiry and datetime.now(UTC) < expiry: # 만료 시간이 있고, 현재 시간보다 미래이면
-        return True # 블랙리스트 유효
-    elif expiry: # 만료 시간이 지났으면
-        op_logger.info(f"Blacklist expired for {symbol_ws}. Removing from list.")
-        with blacklist_lock: # Lock으로 보호
-             # 만료된 항목 제거 (get으로 확인했으므로 존재 보장됨)
-            if symbol_ws in blacklist:
-                 del blacklist[symbol_ws]
-        return False # 블랙리스트 만료
-    return False # 블랙리스트에 없음
-
-def add_to_blacklist(symbol_ws, reason=""):
-    """주어진 심볼을 블랙리스트에 추가"""
-    symbol_clean = symbol_ws.split(':')[0] # ':' 이후 부분 제거 (혹시 모를 경우 대비)
-    expiry = datetime.now(UTC) + timedelta(hours=WHIPSAW_BLACKLIST_HOURS) # 만료 시간 계산
-    with blacklist_lock: # Lock으로 보호
-        blacklist[symbol_clean] = expiry
-    op_logger.warning(f"Blacklisted {symbol_clean} until {expiry.astimezone(KST):%Y-%m-%d %H:%M:%S KST}. Reason: {reason}")
+# def check_symbol_in_blacklist(symbol_ws): # 블랙리스트 제거
+#     ...
+# def add_to_blacklist(symbol_ws, reason=""): # 블랙리스트 제거
+#     ...
 
 def log_asset_status():
     """현재 자산 상태 (잔고, 활성 포지션, 통계)를 주기적으로 로깅"""
@@ -721,11 +724,11 @@ def sync_positions_with_exchange():
                          op_logger.warning(f"[{symbol_ws}] Tried to remove local state, but it was already gone.")
 
 
-        # 4.2 거래소 O / 로컬 X (Exchange Only): 봇이 추적하지 못하는 포지션 -> 즉시 종료 시도 및 블랙리스트
+        # 4.2 거래소 O / 로컬 X (Exchange Only): 봇이 추적하지 못하는 포지션 -> 즉시 종료 시도 (블랙리스트 제거)
         if E_only:
             op_logger.error(f"[SYNC_REST][CRITICAL] Untracked positions found on exchange: {E_only}. These positions were likely created outside the bot or due to a previous error.")
             for symbol_ws in E_only: # 이제 'BTCUSDT' 형식
-                op_logger.error(f"[SYNC_REST][ACTION] -> Attempting to close untracked position for {symbol_ws} immediately and blacklisting.")
+                op_logger.error(f"[SYNC_REST][ACTION] -> Attempting to close untracked position for {symbol_ws} immediately.") # 블랙리스트 문구 제거
                 pos_info = exchange_pos_dict.get(symbol_ws)
                 time.sleep(0.1)
                 if not pos_info:
@@ -768,8 +771,8 @@ def sync_positions_with_exchange():
                 except Exception as close_err:
                     op_logger.error(f"[SYNC_REST] Error occurred while trying to close untracked position {symbol_ws}: {close_err}. MANUAL INTERVENTION REQUIRED.")
 
-                # 3. 블랙리스트 추가 (재진입 방지) - 웹소켓 형식 사용
-                add_to_blacklist(symbol_ws, reason="Untracked position closed via REST Sync")
+                # 3. 블랙리스트 추가 로직 제거
+                # add_to_blacklist(symbol_ws, reason="Untracked position closed via REST Sync")
                 time.sleep(0.5)
 
 
@@ -885,7 +888,7 @@ def update_top_symbols_periodically(interval_seconds):
 
             op_logger.info("[Symbol Update] Starting periodic symbol update process...")
             # 1. 새로운 거래량 상위 심볼 목록 가져오기
-            new_sym_ccxt = get_top_volume_symbols(TOP_N_SYMBOLS)
+            new_sym_ccxt = get_top_volume_symbols(TOP_N_SYMBOLS) # TOP_N_SYMBOLS = 50 적용
             if not new_sym_ccxt:
                 op_logger.warning("[Symbol Update] Failed to fetch new top symbols. Skipping update cycle.")
                 continue # 심볼 목록 조회 실패 시 건너뛰기
@@ -902,7 +905,7 @@ def update_top_symbols_periodically(interval_seconds):
             if to_remove:
                 op_logger.info(f"[Symbol Update] Symbols to remove: {to_remove}")
                 # 웹소켓 구독 해제 메시지 생성
-                streams_to_unsub = [f"{s.lower()}@kline_{TIMEFRAME}" for s in to_remove]
+                streams_to_unsub = [f"{s.lower()}@kline_{TIMEFRAME}" for s in to_remove] # TIMEFRAME = '5m' 적용
                 if streams_to_unsub:
                     msg = {"method": "UNSUBSCRIBE", "params": streams_to_unsub, "id": int(time.time())}
                     try:
@@ -936,7 +939,7 @@ def update_top_symbols_periodically(interval_seconds):
                     if shutdown_requested: break # 종료 요청 시 중단
                     ccxt_symbol = symbol_ws.replace(TARGET_ASSET, f'/{TARGET_ASSET}')
                     # 지표 계산에 필요한 충분한 데이터 로드
-                    df = fetch_initial_ohlcv(ccxt_symbol, TIMEFRAME, limit=max(INITIAL_CANDLE_FETCH_LIMIT, STOCHRSI_LENGTH + STOCHRSI_RSI_LENGTH + 50, BBANDS_PERIOD + 50)) # 필요량 반영
+                    df = fetch_initial_ohlcv(ccxt_symbol, TIMEFRAME, limit=max(INITIAL_CANDLE_FETCH_LIMIT, STOCHRSI_LENGTH + STOCHRSI_RSI_LENGTH + 50, BBANDS_PERIOD + 50, CCI_LENGTH + 50)) # 필요량 반영
                     if df is not None and not df.empty:
                         with data_lock: # Lock으로 보호
                             historical_data[symbol_ws] = df # 데이터 저장
@@ -950,7 +953,7 @@ def update_top_symbols_periodically(interval_seconds):
 
                 # 데이터 로드 성공한 심볼만 웹소켓 구독
                 if added_to_data:
-                    streams_to_sub = [f"{s.lower()}@kline_{TIMEFRAME}" for s in added_to_data]
+                    streams_to_sub = [f"{s.lower()}@kline_{TIMEFRAME}" for s in added_to_data] # TIMEFRAME = '5m' 적용
                     msg = {"method": "SUBSCRIBE", "params": streams_to_sub, "id": int(time.time())}
                     try:
                         # 웹소켓 연결 상태 재확인 후 메시지 전송
@@ -1088,7 +1091,7 @@ def try_update_tp(sym_ws, sym_ccxt, side, amt, tp_id, tp_coid, cur_tp, new_tp):
     return False # 업데이트 조건 미충족 또는 실패 시
 
 def process_kline_message(symbol_ws, kline_data):
-    """K-line 웹소켓 메시지를 처리하여 지표 계산, TP 업데이트, 진입 조건 확인 및 실행 (StochRSI Cross Entry, BBands TP)"""
+    """K-line 웹소켓 메시지를 처리하여 지표 계산, TP 업데이트, 진입 조건 확인 및 실행 (StochRSI Cross + CCI Filter, BBands TP)"""
     global real_positions, entry_in_progress # 전역 변수 사용
 
     # 구독 중인 심볼인지 확인
@@ -1108,7 +1111,7 @@ def process_kline_message(symbol_ws, kline_data):
         df = historical_data.get(symbol_ws)
     if df is None: return
 
-    # 지표 계산 (StochRSI, BBands)
+    # 지표 계산 (StochRSI, CCI, BBands)
     idf = calculate_indicators(df.copy())
     if idf is None or idf.empty or len(idf) < 2:
         return
@@ -1128,10 +1131,13 @@ def process_kline_message(symbol_ws, kline_data):
         prev_k = prev.get(stoch_k_col, np.nan) # 이전 %K 값
         curr_d = last.get(stoch_d_col, np.nan) # 현재 %D 값
         prev_d = prev.get(stoch_d_col, np.nan) # 이전 %D 값
+        # CCI 값 추출
+        cci_col = f'CCI_{CCI_LENGTH}_0.015' # 수정된 CCI 컬럼 이름
+        curr_cci = last.get(cci_col, np.nan) # 현재 CCI 값
 
-        # 필수 값들이 NaN인지 확인 (StochK, StochD, BBands)
-        if any(pd.isna(v) for v in [price, curr_k, prev_k, curr_d, prev_d, bbl, bbu]):
-            # op_logger.debug(f"[{symbol_ws}] Required values contain NaN (Price, StochK/D or BBands). Skipping logic.")
+        # 필수 값들이 NaN인지 확인 (StochK, StochD, CCI, BBands)
+        if any(pd.isna(v) for v in [price, curr_k, prev_k, curr_d, prev_d, curr_cci, bbl, bbu]):
+            # op_logger.debug(f"[{symbol_ws}] Required values contain NaN (Price, StochK/D, CCI or BBands). Skipping logic.")
             return
     except IndexError:
          # op_logger.debug(f"[{symbol_ws}] IndexError accessing indicator data (likely not enough rows).")
@@ -1171,73 +1177,50 @@ def process_kline_message(symbol_ws, kline_data):
         # 이미 포지션 있는지 확인
         with real_positions_lock:
             position_exists = symbol_ws in real_positions
-        # 블랙리스트 확인
-        is_blacklisted = check_symbol_in_blacklist(symbol_ws)
+        # 블랙리스트 확인 로직 제거됨
+        # is_blacklisted = check_symbol_in_blacklist(symbol_ws)
 
-        # 진입 조건: 시도 중X, 포지션X, 블랙리스트X
-        if not is_entry_attempted and not position_exists and not is_blacklisted:
+        # 진입 조건: 시도 중X, 포지션X (블랙리스트 조건 제거)
+        if not is_entry_attempted and not position_exists: # and not is_blacklisted 제거
             # 최대 포지션 개수 확인
             with real_positions_lock:
                 open_position_count = len(real_positions)
             if open_position_count >= MAX_OPEN_POSITIONS:
                 return
 
-            # --- 진입 조건 계산 (Stochastic RSI K/D 교차 및 레벨) ---
+            # --- 진입 조건 계산 (StochRSI K/D 교차 및 레벨 + CCI 필터) ---
             tgt_side = None # 진입 방향 (buy/sell) - 초기화
             tp_tgt = None   # TP 타겟 가격 - 초기화
             entry_px = price # 진입 가격 (현재 종가)
 
-            # StochRSI 조건 계산 (골든/데드 크로스 + 레벨)
-            # 롱: K가 D 상향 돌파 & K, D 모두 15 미만
-            long_entry_condition = (prev_k <= prev_d and curr_k > curr_d) and \
-                                   (curr_k < STOCHRSI_OVERSOLD and curr_d < STOCHRSI_OVERSOLD)
-            # 숏: K가 D 하향 돌파 & K, D 모두 85 초과
-            short_entry_condition = (prev_k >= prev_d and curr_k < curr_d) and \
-                                    (curr_k > STOCHRSI_OVERBOUGHT and curr_d > STOCHRSI_OVERBOUGHT)
+            # StochRSI 조건 계산 (골든/데드 크로스 + 레벨) - 레벨 변경 (10/90)
+            stoch_long_cond = (prev_k <= prev_d and curr_k > curr_d) and \
+                              (curr_k < STOCHRSI_OVERSOLD and curr_d < STOCHRSI_OVERSOLD)
+            stoch_short_cond = (prev_k >= prev_d and curr_k < curr_d) and \
+                               (curr_k > STOCHRSI_OVERBOUGHT and curr_d > STOCHRSI_OVERBOUGHT)
+
+            # CCI 필터 조건
+            cci_long_cond = curr_cci < CCI_BUY_THRESHOLD # CCI가 -100 미만
+            cci_short_cond = curr_cci > CCI_SELL_THRESHOLD # CCI가 100 초과
+
+            # 최종 진입 조건 결합
+            long_entry_condition = stoch_long_cond and cci_long_cond
+            short_entry_condition = stoch_short_cond and cci_short_cond
 
             # 조건 만족 시 진입 방향 및 TP 타겟 설정 (BBands 기준)
             if long_entry_condition:
                 tgt_side = 'buy'
                 tp_tgt = bbu if not pd.isna(bbu) and bbu > 0 else None # 초기 TP는 BBU
-                op_logger.info(f"[{symbol_ws}] Long entry condition met: StochRSI Golden Cross below {STOCHRSI_OVERSOLD} (K:{prev_k:.2f}->{curr_k:.2f}, D:{prev_d:.2f}->{curr_d:.2f}).")
+                op_logger.info(f"[{symbol_ws}] Long entry condition met: StochRSI Golden Cross below {STOCHRSI_OVERSOLD} (K:{curr_k:.2f}, D:{curr_d:.2f}) AND CCI < {CCI_BUY_THRESHOLD} (CCI:{curr_cci:.2f}).")
             elif short_entry_condition:
                 tgt_side = 'sell'
                 tp_tgt = bbl if not pd.isna(bbl) and bbl > 0 else None # 초기 TP는 BBL
-                op_logger.info(f"[{symbol_ws}] Short entry condition met: StochRSI Dead Cross above {STOCHRSI_OVERBOUGHT} (K:{prev_k:.2f}->{curr_k:.2f}, D:{prev_d:.2f}->{curr_d:.2f}).")
+                op_logger.info(f"[{symbol_ws}] Short entry condition met: StochRSI Dead Cross above {STOCHRSI_OVERBOUGHT} (K:{curr_k:.2f}, D:{curr_d:.2f}) AND CCI > {CCI_SELL_THRESHOLD} (CCI:{curr_cci:.2f}).")
 
             # 진입 방향(tgt_side)이 결정되고 TP 타겟(tp_tgt)이 유효할 때
             if tgt_side and tp_tgt is not None and tp_tgt > 0: # TP 가격 유효성 추가
 
-                # --- 추가된 로직: 8시간봉 방향성 필터 ---
-                op_logger.debug(f"[{symbol_ws}] StochRSI condition met. Checking 8h candle direction for {tgt_side} entry...")
-                ohlcv_8h = fetch_ohlcv_data(sym_ccxt, timeframe='8h', limit=1)
-                trend_ok = False
-                if ohlcv_8h and len(ohlcv_8h) > 0:
-                    try:
-                        _, open_8h, _, _, close_8h, _ = ohlcv_8h[0] # 최신 8시간봉 데이터
-                        open_8h = float(open_8h)
-                        close_8h = float(close_8h)
-                        if tgt_side == 'buy':
-                            if close_8h > open_8h: # 양봉 확인
-                                trend_ok = True
-                                op_logger.info(f"[{symbol_ws}] 8h candle is bullish (O:{open_8h}, C:{close_8h}). Trend filter passed for LONG.")
-                            else:
-                                op_logger.info(f"[{symbol_ws}] Entry skipped: 8h candle is bearish or neutral (O:{open_8h}, C:{close_8h}). Trend filter failed for LONG.")
-                        elif tgt_side == 'sell':
-                            if close_8h < open_8h: # 음봉 확인
-                                trend_ok = True
-                                op_logger.info(f"[{symbol_ws}] 8h candle is bearish (O:{open_8h}, C:{close_8h}). Trend filter passed for SHORT.")
-                            else:
-                                op_logger.info(f"[{symbol_ws}] Entry skipped: 8h candle is bullish or neutral (O:{open_8h}, C:{close_8h}). Trend filter failed for SHORT.")
-                    except Exception as e:
-                        op_logger.error(f"[{symbol_ws}] Error processing 8h candle data: {e}. Skipping entry.")
-                else:
-                    op_logger.warning(f"[{symbol_ws}] Could not fetch 8h candle data. Skipping trend filter and entry.")
-
-                if not trend_ok: # 방향성 필터 통과 못하면 진입 안함
-                    return
-                # --- 8시간봉 필터 끝 ---
-
+                # --- 8시간봉 필터 제거됨 ---
 
                 # *** 수수료 고려 최소 이익률 체크 ***
                 if entry_px <= 0:
@@ -1311,11 +1294,15 @@ def process_kline_message(symbol_ws, kline_data):
 
                         # TP 주문 실행
                         tp_order = place_take_profit_market_order(sym_ccxt, sl_tp_side, final_tp_price, entry_amount)
+                        # TP 주문 실패는 경고로 처리하고 계속 진행
                         if not tp_order or not tp_order.get('id'):
-                            raise Exception("Take Profit (TP) order placement failed")
-                        op_logger.info(f"[{symbol_ws}] TP order placed successfully (ID:{tp_order['id']})")
+                            op_logger.warning(f"[{symbol_ws}] Take Profit (TP) order placement failed or returned no ID. Proceeding without TP order initially.")
+                            # raise Exception("Take Profit (TP) order placement failed") # TP 실패 시 롤백 안함
 
-                        # 6. 모든 주문 성공 시 로컬 상태 저장
+                        if tp_order and tp_order.get('id'):
+                             op_logger.info(f"[{symbol_ws}] TP order placed successfully (ID:{tp_order['id']})")
+
+                        # 6. 로컬 상태 저장 (TP 주문 실패 여부와 관계없이 저장 시도)
                         with real_positions_lock:
                             if len(real_positions) < MAX_OPEN_POSITIONS:
                                 real_positions[symbol_ws] = {
@@ -1327,21 +1314,22 @@ def process_kline_message(symbol_ws, kline_data):
                                     'entry_client_order_id': entry_coid,
                                     'sl_order_id': sl_order['id'],
                                     'sl_client_order_id': sl_order.get('clientOrderId'),
-                                    'tp_order_id': tp_order['id'],
-                                    'tp_client_order_id': tp_order.get('clientOrderId'),
-                                    'current_tp_price': final_tp_price # 초기 TP 가격 (BBands 값) 저장
+                                    # TP 주문 정보는 성공 시에만 저장
+                                    'tp_order_id': tp_order['id'] if tp_order and tp_order.get('id') else None,
+                                    'tp_client_order_id': tp_order.get('clientOrderId') if tp_order and tp_order.get('id') else None,
+                                    'current_tp_price': final_tp_price if tp_order and tp_order.get('id') else None # TP 가격은 저장
                                 }
                                 op_logger.info(f"[{symbol_ws}] <<< Entry successful and position state stored. Active Positions: {len(real_positions)} >>>")
                             else:
                                 op_logger.error(f"[{symbol_ws}] Max positions reached just before storing state! Rolling back SL/TP orders.")
                                 raise Exception("Max positions reached during final state storage")
 
-                    except Exception as sltp_e: # SL 또는 TP 주문 실패 시 롤백
+                    except Exception as sltp_e: # SL 주문 실패 등 다른 예외 발생 시 롤백
                         op_logger.error(f"[{symbol_ws}] Error placing SL/TP orders: {sltp_e}. !!! INITIATING ROLLBACK !!!")
                         if sl_order and sl_order.get('id'):
                             op_logger.warning(f"[{symbol_ws}] Rollback: Cancelling SL order {sl_order['id']}")
                             Thread(target=cancel_order, args=(sym_ccxt,), kwargs={'order_id': sl_order['id'], 'client_order_id': sl_order.get('clientOrderId')}, daemon=True).start()
-                        if tp_order and tp_order.get('id'):
+                        if tp_order and tp_order.get('id'): # TP 주문이 생성되었다면 취소 시도
                             op_logger.warning(f"[{symbol_ws}] Rollback: Cancelling TP order {tp_order['id']}")
                             Thread(target=cancel_order, args=(sym_ccxt,), kwargs={'order_id': tp_order['id'], 'client_order_id': tp_order.get('clientOrderId')}, daemon=True).start()
                         op_logger.warning(f"[{symbol_ws}] Rollback: Attempting to cancel entry order {entry_oid} (might be filled)")
@@ -1349,13 +1337,13 @@ def process_kline_message(symbol_ws, kline_data):
                         op_logger.warning(f"[{symbol_ws}] Rollback process initiated. Position might need manual closing if entry was filled.")
                         with real_positions_lock:
                             real_positions.pop(symbol_ws, None)
-                        add_to_blacklist(symbol_ws, reason=f"Entry failed during SL/TP placement: {sltp_e}")
+                        # add_to_blacklist(symbol_ws, reason=f"Entry failed during SL/TP placement: {sltp_e}") # 블랙리스트 제거
 
                 except Exception as entry_e: # 진입 프로세스 전반의 예외 처리
                     op_logger.error(f"[{symbol_ws}] Entry process failed: {entry_e}", exc_info=False)
                     with real_positions_lock:
                         real_positions.pop(symbol_ws, None)
-                    add_to_blacklist(symbol_ws, reason=f"Entry process failed: {entry_e}")
+                    # add_to_blacklist(symbol_ws, reason=f"Entry process failed: {entry_e}") # 블랙리스트 제거
                 finally:
                     # 진입 시도 플래그 해제
                     with entry_lock:
@@ -1370,7 +1358,7 @@ def on_message_kline(wsapp, message):
         data = json.loads(message) # JSON 파싱
         # 스트림 데이터 형식인지 확인 ('stream'과 'data' 필드 존재)
         if 'stream' in data and 'data' in data:
-            stream_name = data['stream'] # 스트림 이름 (e.g., btcusdt@kline_15m)
+            stream_name = data['stream'] # 스트림 이름 (e.g., btcusdt@kline_5m)
             payload = data['data'] # 실제 데이터
             # K-line 이벤트인지 확인
             if payload.get('e') == 'kline':
@@ -1417,7 +1405,7 @@ def on_open_kline_initial(wsapp):
 
     # 1. 초기 거래 대상 심볼 목록 가져오기
     op_logger.info("Fetching initial top symbols for subscription...")
-    initial_sym_ccxt = get_top_volume_symbols(TOP_N_SYMBOLS)
+    initial_sym_ccxt = get_top_volume_symbols(TOP_N_SYMBOLS) # TOP_N_SYMBOLS = 50 적용
     if not initial_sym_ccxt:
         op_logger.error("Could not fetch initial symbols. Shutting down.")
         shutdown_requested = True # 종료 플래그 설정
@@ -1428,7 +1416,7 @@ def on_open_kline_initial(wsapp):
     op_logger.info(f"Subscribing to initial {len(initial_sym_ws)} K-line streams...")
 
     # 2. 웹소켓 스트림 구독 요청
-    streams = [f"{s.lower()}@kline_{TIMEFRAME}" for s in initial_sym_ws]
+    streams = [f"{s.lower()}@kline_{TIMEFRAME}" for s in initial_sym_ws] # TIMEFRAME = '5m' 적용
     if not streams:
         op_logger.error("No streams to subscribe to initially. Shutting down.")
         shutdown_requested = True
@@ -1460,7 +1448,7 @@ def on_open_kline_initial(wsapp):
         if shutdown_requested: break # 종료 요청 시 중단
         sym_ccxt = symbol_ws.replace(TARGET_ASSET, f'/{TARGET_ASSET}')
         # 지표 계산에 필요한 충분한 데이터 로드
-        df = fetch_initial_ohlcv(sym_ccxt, TIMEFRAME, limit=max(INITIAL_CANDLE_FETCH_LIMIT, STOCHRSI_LENGTH + STOCHRSI_RSI_LENGTH + 50, BBANDS_PERIOD + 50)) # 필요량 반영
+        df = fetch_initial_ohlcv(sym_ccxt, TIMEFRAME, limit=max(INITIAL_CANDLE_FETCH_LIMIT, STOCHRSI_LENGTH + STOCHRSI_RSI_LENGTH + 50, BBANDS_PERIOD + 50, CCI_LENGTH + 50)) # 필요량 반영
         if df is not None and not df.empty:
             with data_lock: # Lock으로 보호
                 historical_data[symbol_ws] = df # 데이터 저장
@@ -1473,7 +1461,7 @@ def on_open_kline_initial(wsapp):
         time.sleep(0.3) # API 호출 간 지연
 
     op_logger.info(f"Initial historical data fetch complete ({fetched_count} symbols OK, {error_count} errors).")
-    print("-" * 80 + "\nK-line WebSocket connected. Bot is now listening for market data (REST Sync Mode)...\n" + "-" * 80)
+    print("-" * 80 + f"\nK-line WebSocket connected ({TIMEFRAME}). Bot is now listening for market data...\n" + "-" * 80) # 모드 명시 제거
 
 def on_open_kline_reconnect(wsapp):
     """K-line 웹소켓 재연결 성공 시 호출되는 콜백 함수"""
@@ -1491,7 +1479,7 @@ def on_open_kline_reconnect(wsapp):
 
     # 기존 구독 목록으로 재구독 요청
     op_logger.info(f"Resubscribing to {len(current_subs)} previously subscribed K-line streams...")
-    streams = [f"{s.lower()}@kline_{TIMEFRAME}" for s in current_subs]
+    streams = [f"{s.lower()}@kline_{TIMEFRAME}" for s in current_subs] # TIMEFRAME = '5m' 적용
     if not streams:
         op_logger.warning("No streams found to resubscribe.")
         return
@@ -1525,8 +1513,9 @@ if __name__ == "__main__":
 
     # 실제 거래 모드 경고
     op_logger.warning("="*30 + f" REAL TRADING MODE - {log_prefix} " + "="*30)
-    op_logger.warning("Strategy: Stochastic RSI K/D Cross Entry + 8h Trend Filter / Dynamic BBands TP / Fixed SL / REST Sync / Auto K-line Reconnect") # 전략 설명 수정
+    op_logger.warning("Strategy: Stochastic RSI K/D Cross Entry + CCI Filter / Dynamic BBands TP / Fixed SL / REST Sync / Auto K-line Reconnect") # 전략 설명 수정
     op_logger.warning(f"Key Settings: StochRSI({STOCHRSI_LENGTH},{STOCHRSI_RSI_LENGTH},{STOCHRSI_K},{STOCHRSI_D}), OS Level={STOCHRSI_OVERSOLD}, OB Level={STOCHRSI_OVERBOUGHT}")
+    op_logger.warning(f"             CCI({CCI_LENGTH}), Filter Range=({CCI_BUY_THRESHOLD} ~ {CCI_SELL_THRESHOLD})") # CCI 설정 추가
     op_logger.warning(f"             BBands({BBANDS_PERIOD}, {BBANDS_STDDEV}), TP Update Delay={POSITION_MONITORING_DELAY_MINUTES}min, Threshold={TP_UPDATE_THRESHOLD_PERCENT}%")
     op_logger.warning(f"             MaxPos={MAX_OPEN_POSITIONS}, Leverage={LEVERAGE}x, Timeframe={TIMEFRAME}, SL={1-LONG_STOP_LOSS_FACTOR:.2%}/{SHORT_STOP_LOSS_FACTOR-1:.2%}")
     op_logger.warning(f"             SymbolUpdateInterval={SYMBOL_UPDATE_INTERVAL_HOURS}h, RESTSyncInterval={REST_SYNC_INTERVAL_MINUTES}min, FeeRate={FEE_RATE}")
