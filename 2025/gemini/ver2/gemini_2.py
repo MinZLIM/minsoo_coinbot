@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# === 최종 버전 V2.3.1 (BBM 추세 기반 진입 로직 + 추세 강화 조건 + 586라인 문법 오류 수정) ===
-# === 로직: BBM 2차 저항(낮은 고점)/지지(높은 저점) 시 진입 / 동적 BBands TP / 고정 SL / REST Sync / Auto K-line Reconnect ===
+# === 최종 버전 V2.4 (BBM 추세 + MACD 필터 + BBM 근접 판단 로직 수정) ===
+# === 로직: BBM 2차 저항/지지(강화조건) + MACD 필터 / 동적 BBands TP / 고정 SL / REST Sync / Auto K-line Reconnect ===
 
 # Imports
 import ccxt
@@ -27,8 +27,8 @@ except ImportError:
 # ==============================================================================
 # 사용자 설정 값 (User Settings)
 # ==============================================================================
-API_KEY = "" # 실제 API 키로 변경하세요
-API_SECRET = "" # 실제 API 시크릿으로 변경하세요
+API_KEY = "YOUR_BINANCE_API_KEY" # 실제 API 키로 변경하세요
+API_SECRET = "YOUR_BINANCE_API_SECRET" # 실제 API 시크릿으로 변경하세요
 SIMULATION_MODE = False # 실제 거래 시 False로 설정
 LEVERAGE = 10 # 레버리지 설정
 MAX_OPEN_POSITIONS = 4 # 최대 동시 진입 포지션 수
@@ -37,41 +37,46 @@ TIMEFRAME = '15m' # 사용할 캔들 시간봉
 TIMEFRAME_MINUTES = 15 # 시간봉 분 단위
 TARGET_ASSET = 'USDT' # 타겟 자산 (테더)
 
-# --- Stochastic RSI 설정 (현재 진입 로직에서 직접 사용 안 함, 지표 계산에는 포함) ---
+# --- Stochastic RSI 설정 (지표 계산에는 포함, 직접 진입 조건으로 사용 안함) ---
 STOCHRSI_LENGTH = 21
 STOCHRSI_RSI_LENGTH = 21
 STOCHRSI_K = 10
 STOCHRSI_D = 10
 
-# --- Bollinger Bands 설정 (동적 TP용 및 신규 진입 로직용) ---
-BBANDS_PERIOD = 20 # 볼린저 밴드 기간
-BBANDS_STDDEV = 2.0 # 볼린저 밴드 표준편차
-BBM_REJECTION_PERCENT = 0.0002 # BBM 저항/지지 판단 시 허용 오차 (1%)
+# --- Bollinger Bands 설정 ---
+BBANDS_PERIOD = 20
+BBANDS_STDDEV = 2.0
+BBM_REJECTION_PERCENT = 0.0003 # BBM 저항/지지 판단 시 허용 오차 (0.03%)
+
+# --- MACD 설정 ---
+MACD_FAST_PERIOD = 12
+MACD_SLOW_PERIOD = 26
+MACD_SIGNAL_PERIOD = 9
 
 # --- SL 설정 ---
-LONG_STOP_LOSS_FACTOR = 0.995 # 롱 포지션 손절 비율 (진입가 * 0.995)
-SHORT_STOP_LOSS_FACTOR = 1.005 # 숏 포지션 손절 비율 (진입가 * 1.005)
+LONG_STOP_LOSS_FACTOR = 0.995
+SHORT_STOP_LOSS_FACTOR = 1.005
 
 # --- 기타 설정 ---
-POSITION_MONITORING_DELAY_MINUTES = 5 # 포지션 진입 후 TP 업데이트 시작까지 대기 시간(분)
-TP_UPDATE_THRESHOLD_PERCENT = 0.1 # TP 업데이트를 위한 최소 가격 변동률 (%)
-REST_SYNC_INTERVAL_MINUTES = 5 # REST API 상태 동기화 주기(분)
-SYMBOL_UPDATE_INTERVAL_HOURS = 2 # 거래 대상 심볼 목록 업데이트 주기(시간)
-API_RETRY_COUNT = 3 # API 호출 실패 시 재시도 횟수
-API_RETRY_DELAY_SECONDS = 2 # API 호출 재시도 간격(초)
-FEE_RATE = 0.0005 # 예상 수수료율 (시장가 기준, 필요시 조정, 예: 0.05% -> 0.0005)
-INITIAL_CANDLE_FETCH_LIMIT = 100 # 초기 캔들 데이터 로드 개수 (지표 계산 위해 충분히 확보)
-MAX_CANDLE_HISTORY = 200 # 메모리에 유지할 최대 캔들 개수
-KST = ZoneInfo("Asia/Seoul") # 한국 시간대
-UTC = timezone.utc # UTC 시간대
-pd.set_option('display.max_rows', None); pd.set_option('display.max_columns', None); pd.set_option('display.width', None) # Pandas 출력 옵션
+POSITION_MONITORING_DELAY_MINUTES = 5
+TP_UPDATE_THRESHOLD_PERCENT = 0.1
+REST_SYNC_INTERVAL_MINUTES = 5
+SYMBOL_UPDATE_INTERVAL_HOURS = 2
+API_RETRY_COUNT = 3
+API_RETRY_DELAY_SECONDS = 2
+FEE_RATE = 0.0005
+INITIAL_CANDLE_FETCH_LIMIT = 100
+MAX_CANDLE_HISTORY = 200 # MACD 계산을 위해 충분한 길이 확보 필요 (slow + signal + buffer)
+KST = ZoneInfo("Asia/Seoul")
+UTC = timezone.utc
+pd.set_option('display.max_rows', None); pd.set_option('display.max_columns', None); pd.set_option('display.width', None)
 
 # ==============================================================================
 # 로깅 설정 (Logging Setup)
 # ==============================================================================
 log_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else os.getcwd()
 log_filename_base = "bot_log"
-log_prefix = "[BBM_TREND_V2.3.1_Enhanced]" # 로그 메시지 접두사 변경
+log_prefix = "[BBM_MACD_V2.4_Enhanced]"
 
 op_logger = logging.getLogger('operation')
 op_logger.setLevel(logging.INFO)
@@ -114,10 +119,9 @@ symbol_update_thread = None
 sync_thread = None
 binance_rest = None
 
-# --- BBM 추세 진입 로직용 상태 변수 ---
-first_resistance_details = {} # {symbol_ws: {'timestamp': pd.Timestamp | None, 'price': float | None}}
+first_resistance_details = {}
 first_resistance_details_lock = Lock()
-first_support_details = {}    # {symbol_ws: {'timestamp': pd.Timestamp | None, 'price': float | None}}
+first_support_details = {}
 first_support_details_lock = Lock()
 
 # ==============================================================================
@@ -220,7 +224,9 @@ def fetch_initial_ohlcv(symbol_ccxt, timeframe=TIMEFRAME, limit=INITIAL_CANDLE_F
     if not binance_rest: return None
     try:
         bbands_buffer = BBANDS_PERIOD + 50
-        actual_limit = max(limit, bbands_buffer, MAX_CANDLE_HISTORY, STOCHRSI_LENGTH + STOCHRSI_RSI_LENGTH + 50)
+        macd_buffer = MACD_SLOW_PERIOD + MACD_SIGNAL_PERIOD + 50 # MACD 계산을 위한 버퍼
+        stochrsi_buffer = STOCHRSI_LENGTH + STOCHRSI_RSI_LENGTH + 50
+        actual_limit = max(limit, bbands_buffer, macd_buffer, stochrsi_buffer, MAX_CANDLE_HISTORY)
         op_logger.debug(f"Fetching initial {actual_limit} candles for {symbol_ccxt} ({timeframe})...")
         ohlcv = call_api_with_retry(lambda: binance_rest.fetch_ohlcv(symbol_ccxt, timeframe=timeframe, limit=actual_limit),
                                     error_message=f"fetch_ohlcv for {symbol_ccxt}")
@@ -239,32 +245,48 @@ def fetch_initial_ohlcv(symbol_ccxt, timeframe=TIMEFRAME, limit=INITIAL_CANDLE_F
 def calculate_indicators(df):
     bbands_req_len = BBANDS_PERIOD
     stochrsi_req_len = STOCHRSI_LENGTH + STOCHRSI_RSI_LENGTH + 1
-    required_len = max(bbands_req_len, stochrsi_req_len) + 50
+    macd_req_len = MACD_SLOW_PERIOD + MACD_SIGNAL_PERIOD -1 # pandas-ta는 slow + signal -1 정도 필요
+    required_len = max(bbands_req_len, stochrsi_req_len, macd_req_len) + 50
 
     if df is None or len(df) < required_len:
         op_logger.debug(f"Not enough data for indicators: Have {len(df) if df is not None else 0}, Need >{required_len}")
         return None
     try:
         df_copy = df.copy()
+        # StochRSI
         df_copy.ta.stochrsi(length=STOCHRSI_LENGTH, rsi_length=STOCHRSI_RSI_LENGTH, k=STOCHRSI_K, d=STOCHRSI_D, append=True)
+        # Bollinger Bands
         df_copy.ta.bbands(length=BBANDS_PERIOD, std=BBANDS_STDDEV, append=True)
         bbl_col = f'BBL_{BBANDS_PERIOD}_{float(BBANDS_STDDEV)}'
         bbm_col = f'BBM_{BBANDS_PERIOD}_{float(BBANDS_STDDEV)}'
         bbu_col = f'BBU_{BBANDS_PERIOD}_{float(BBANDS_STDDEV)}'
-        rename_map = { bbl_col: 'BBL', bbm_col: 'BBM', bbu_col: 'BBU' }
-        existing_rename_map = {k: v for k, v in rename_map.items() if k in df_copy.columns}
-
-        if len(existing_rename_map) < 3:
+        rename_map_bb = { bbl_col: 'BBL', bbm_col: 'BBM', bbu_col: 'BBU' }
+        existing_rename_map_bb = {k: v for k,v in rename_map_bb.items() if k in df_copy.columns}
+        if len(existing_rename_map_bb) < 3:
              op_logger.warning(f"BBands columns not fully generated. Expected BBL, BBM, BBU. Available: {df_copy.columns.tolist()}")
              return None
-        df_copy.rename(columns=existing_rename_map, inplace=True)
+        df_copy.rename(columns=existing_rename_map_bb, inplace=True)
 
-        required_indicator_cols = ['BBL', 'BBM', 'BBU']
-        if not all(col in df_copy.columns for col in required_indicator_cols):
-            op_logger.warning(f"Required BBands columns missing. Needed: {required_indicator_cols}, Have: {df_copy.columns.tolist()}")
+        # MACD
+        df_copy.ta.macd(fast=MACD_FAST_PERIOD, slow=MACD_SLOW_PERIOD, signal=MACD_SIGNAL_PERIOD, append=True)
+        macd_line_col = f'MACD_{MACD_FAST_PERIOD}_{MACD_SLOW_PERIOD}_{MACD_SIGNAL_PERIOD}'
+        macd_signal_col = f'MACDs_{MACD_FAST_PERIOD}_{MACD_SLOW_PERIOD}_{MACD_SIGNAL_PERIOD}'
+        # macd_hist_col = f'MACDh_{MACD_FAST_PERIOD}_{MACD_SLOW_PERIOD}_{MACD_SIGNAL_PERIOD}' # 히스토그램은 현재 사용 안함
+        rename_map_macd = {macd_line_col: 'MACD_line', macd_signal_col: 'MACD_signal'}
+        existing_rename_map_macd = {k:v for k,v in rename_map_macd.items() if k in df_copy.columns}
+        if len(existing_rename_map_macd) < 2: # MACD line, signal line 모두 생성되었는지 확인
+            op_logger.warning(f"MACD columns not fully generated. Expected MACD_line, MACD_signal. Available: {df_copy.columns.tolist()}")
             return None
-        if len(df_copy) < 2 or df_copy[required_indicator_cols].iloc[-2:].isnull().any().any():
-            op_logger.debug(f"Latest or previous BBands values (BBL, BBM, BBU) contain NaN.")
+        df_copy.rename(columns=existing_rename_map_macd, inplace=True)
+
+
+        required_cols = ['BBL', 'BBM', 'BBU', 'MACD_line', 'MACD_signal']
+        if not all(col in df_copy.columns for col in required_cols):
+            op_logger.warning(f"Required indicator columns missing. Needed: {required_cols}, Have: {df_copy.columns.tolist()}")
+            return None
+        # BBM, MACD는 이전 캔들 값도 사용하므로, 최소 2개의 유효한 값이 필요
+        if len(df_copy) < 2 or df_copy[required_cols].iloc[-2:].isnull().any().any():
+            op_logger.debug(f"Latest or previous indicator values (BBands or MACD) contain NaN.")
             return None
         return df_copy
     except Exception as e:
@@ -574,7 +596,7 @@ def sync_positions_with_exchange():
                         op_logger.error(f"[SYNC_REST] Failed to close untracked {symbol_ccxt}. MANUAL INTERVENTION.")
                     else:
                         op_logger.info(f"[SYNC_REST] Closed untracked {symbol_ccxt}. Order ID: {close_order_result.get('id')}")
-                        with stats_lock: # Corrected indentation for with statement
+                        with stats_lock:
                             total_trades += 1
                 except Exception as close_err: op_logger.error(f"[SYNC_REST] Error closing untracked {symbol_ccxt}: {close_err}. MANUAL INTERVENTION.")
                 time.sleep(0.5)
@@ -773,7 +795,7 @@ def process_kline_message(symbol_ws, kline_data):
     if df is None: return
 
     idf = calculate_indicators(df.copy())
-    if idf is None or idf.empty or len(idf) < 2:
+    if idf is None or idf.empty or len(idf) < 2: # MACD, BBM 등 이전 값 필요
         return
 
     try:
@@ -782,11 +804,18 @@ def process_kline_message(symbol_ws, kline_data):
         current_price = current_candle['close']
         bbl, bbm, bbu = current_candle.get('BBL'), current_candle.get('BBM'), current_candle.get('BBU')
         prev_bbm_value = prev_candle.get('BBM')
+        # MACD 값 가져오기
+        current_macd_line = current_candle.get('MACD_line')
+        current_macd_signal = current_candle.get('MACD_signal')
+
+        # 모든 필요한 지표 값이 유효한지 확인
         if any(pd.isna(v) for v in [current_price, bbl, bbm, bbu, prev_bbm_value,
                                      prev_candle['high'], prev_candle['low'], prev_candle['close'], prev_candle['open'],
-                                     current_candle['high'], current_candle['low'], current_candle['open']]):
+                                     current_candle['high'], current_candle['low'], current_candle['open'],
+                                     current_macd_line, current_macd_signal]):
+            op_logger.debug(f"[{symbol_ws}] Skipping due to NaN in critical indicator values.")
             return
-    except IndexError: return
+    except IndexError: op_logger.debug(f"[{symbol_ws}] Skipping due to IndexError (not enough data)."); return
     except Exception as e: op_logger.error(f"[{symbol_ws}] Error accessing indicator data: {e}"); return
 
     now = datetime.now(UTC)
@@ -794,6 +823,7 @@ def process_kline_message(symbol_ws, kline_data):
     pos_copy = {}
     with real_positions_lock: pos_copy = real_positions.copy()
 
+    # --- TP 업데이트 로직 ---
     if symbol_ws in pos_copy:
         pinfo = pos_copy[symbol_ws]
         side, entry_time, amount = pinfo['side'], pinfo['entry_time'], pinfo['amount']
@@ -803,6 +833,7 @@ def process_kline_message(symbol_ws, kline_data):
             if not pd.isna(new_tp_target) and new_tp_target > 0:
                 try_update_tp(symbol_ws, side, amount, tp_id, tp_coid, current_tp_val, new_tp_target)
 
+    # --- 진입 로직 ---
     if is_closed:
         with entry_lock: is_entry_attempted = entry_in_progress.get(symbol_ws, False)
         with real_positions_lock: position_exists = symbol_ws in real_positions
@@ -817,57 +848,84 @@ def process_kline_message(symbol_ws, kline_data):
             tgt_side, tp_tgt, entry_px = None, None, current_price
             entry_condition_met = False
 
-            prev_high_near_prev_bbm = (prev_candle['high'] >= prev_bbm_value * (1 - BBM_REJECTION_PERCENT)) and \
-                                      (prev_candle['high'] <= prev_bbm_value * (1 + BBM_REJECTION_PERCENT))
-            current_candle_confirms_rejection = current_candle['close'] < prev_candle['high'] and current_candle['close'] < current_candle['open']
+            # BBM 근접 판단 로직 수정: 이전 캔들의 시가, 고가, 저가, 종가 중 하나라도 BBM 범위 내에 있는지 확인
+            def is_prev_candle_near_bbm(prev_candle_data, prev_bbm_val, rejection_percent, check_type='resistance'):
+                """ 이전 캔들의 O,H,L,C 중 하나라도 BBM 근처인지 확인 """
+                if pd.isna(prev_bbm_val): return False, None
+                prices_to_check = [prev_candle_data['open'], prev_candle_data['high'], prev_candle_data['low'], prev_candle_data['close']]
+                contact_price = None
+                for price_point in prices_to_check:
+                    if pd.isna(price_point): continue
+                    if (price_point >= prev_bbm_val * (1 - rejection_percent)) and \
+                       (price_point <= prev_bbm_val * (1 + rejection_percent)):
+                        if check_type == 'resistance':
+                            contact_price = price_point if contact_price is None else max(contact_price, price_point) # 저항은 가장 높은 접점
+                        else: # support
+                            contact_price = price_point if contact_price is None else min(contact_price, price_point) # 지지는 가장 낮은 접점
+                return contact_price is not None, contact_price
 
-            if prev_high_near_prev_bbm and current_candle_confirms_rejection:
-                if resistance_info['price'] is not None:
+            # --- 숏 포지션 진입 조건 ---
+            prev_candle_touched_bbm_for_resistance, resistance_contact_price = is_prev_candle_near_bbm(prev_candle, prev_bbm_value, BBM_REJECTION_PERCENT, 'resistance')
+            current_candle_confirms_rejection = current_candle['close'] < prev_candle['high'] and current_candle['close'] < current_candle['open'] # 기존 로직 유지 (고점보다 낮게, 음봉)
+
+            if prev_candle_touched_bbm_for_resistance and current_candle_confirms_rejection:
+                current_attempt_high = resistance_contact_price # BBM에 접촉한 실제 가격 (O,H,L,C 중)
+                if resistance_info['price'] is not None: # 첫 번째 저항이 이미 기록됨
                     first_recorded_resistance_high = resistance_info['price']
-                    current_attempt_high = prev_candle['high']
-                    if current_attempt_high < first_recorded_resistance_high:
-                        op_logger.info(f"[{symbol_ws}] Second BBM resistance confirmed. PrevHigh:{current_attempt_high:.5f} (vs First:{first_recorded_resistance_high:.5f}) near PrevBBM:{prev_bbm_value:.5f}. CurrentClose:{current_price:.5f}. Attempting SHORT.")
-                        tgt_side = 'sell'
-                        tp_tgt = bbl if not pd.isna(bbl) and bbl > 0 else None
-                        entry_condition_met = True
-                    else:
+                    if current_attempt_high < first_recorded_resistance_high: # 추세 강화 조건
+                        # MACD 필터 추가
+                        if current_macd_line > current_macd_signal: # 골든 크로스 상태 (숏 진입 안함)
+                            op_logger.info(f"[{symbol_ws}] SHORT entry SKIPPED for {symbol_ccxt} due to MACD Golden Cross (MACD:{current_macd_line:.4f} > Signal:{current_macd_signal:.4f}).")
+                        else:
+                            op_logger.info(f"[{symbol_ws}] Second BBM resistance confirmed. ContactPrice:{current_attempt_high:.5f} (vs First:{first_recorded_resistance_high:.5f}) near PrevBBM:{prev_bbm_value:.5f}. CurrentClose:{current_price:.5f}. MACD OK. Attempting SHORT.")
+                            tgt_side = 'sell'
+                            tp_tgt = bbl if not pd.isna(bbl) and bbl > 0 else None
+                            entry_condition_met = True
+                    else: # 2차 저항이 1차보다 낮지 않음 -> 1차 저항 업데이트
                         op_logger.info(f"[{symbol_ws}] Second BBM resistance attempt at {current_attempt_high:.5f} NOT lower than first at {first_recorded_resistance_high:.5f}. Updating first resistance to current point.")
                         with first_resistance_details_lock: first_resistance_details[symbol_ws] = {'timestamp': prev_candle.name, 'price': current_attempt_high}
                         with first_support_details_lock: first_support_details[symbol_ws] = {'timestamp': None, 'price': None}
-                else:
-                    op_logger.info(f"[{symbol_ws}] First BBM resistance confirmed. PrevHigh:{prev_candle['high']:.5f} near PrevBBM:{prev_bbm_value:.5f}. CurrentClose:{current_price:.5f}. Waiting for second.")
-                    with first_resistance_details_lock: first_resistance_details[symbol_ws] = {'timestamp': prev_candle.name, 'price': prev_candle['high']}
+                else: # 첫 번째 저항 시도
+                    op_logger.info(f"[{symbol_ws}] First BBM resistance confirmed. ContactPrice:{current_attempt_high:.5f} near PrevBBM:{prev_bbm_value:.5f}. CurrentClose:{current_price:.5f}. Waiting for second.")
+                    with first_resistance_details_lock: first_resistance_details[symbol_ws] = {'timestamp': prev_candle.name, 'price': current_attempt_high}
                     with first_support_details_lock: first_support_details[symbol_ws] = {'timestamp': None, 'price': None}
-            elif resistance_info['price'] is not None and current_price > prev_bbm_value * (1 + BBM_REJECTION_PERCENT * 1.5):
+            # 숏 조건 대기 중 가격이 BBM 위로 강하게 올라가면 상태 초기화
+            elif resistance_info['price'] is not None and current_price > prev_bbm_value * (1 + BBM_REJECTION_PERCENT * 1.5): # 1.5배 여유
                  op_logger.info(f"[{symbol_ws}] Price broke above BBM after 1st resistance. Resetting resistance state. Close:{current_price:.5f}, PrevBBM:{prev_bbm_value:.5f}")
                  with first_resistance_details_lock: first_resistance_details[symbol_ws] = {'timestamp': None, 'price': None}
 
-            if not entry_condition_met:
-                prev_low_near_prev_bbm = (prev_candle['low'] <= prev_bbm_value * (1 + BBM_REJECTION_PERCENT)) and \
-                                         (prev_candle['low'] >= prev_bbm_value * (1 - BBM_REJECTION_PERCENT))
-                current_candle_confirms_support = current_candle['close'] > prev_candle['low'] and current_candle['close'] > current_candle['open']
+            # --- 롱 포지션 진입 조건 ---
+            if not entry_condition_met: # 숏 조건이 충족되지 않았을 때만 롱 조건 확인
+                prev_candle_touched_bbm_for_support, support_contact_price = is_prev_candle_near_bbm(prev_candle, prev_bbm_value, BBM_REJECTION_PERCENT, 'support')
+                current_candle_confirms_support = current_candle['close'] > prev_candle['low'] and current_candle['close'] > current_candle['open'] # 기존 로직 유지 (저점보다 높게, 양봉)
 
-                if prev_low_near_prev_bbm and current_candle_confirms_support:
-                    if support_info['price'] is not None:
+                if prev_candle_touched_bbm_for_support and current_candle_confirms_support:
+                    current_attempt_low = support_contact_price # BBM에 접촉한 실제 가격 (O,H,L,C 중)
+                    if support_info['price'] is not None: # 첫 번째 지지가 이미 기록됨
                         first_recorded_support_low = support_info['price']
-                        current_attempt_low = prev_candle['low']
-                        if current_attempt_low > first_recorded_support_low:
-                            op_logger.info(f"[{symbol_ws}] Second BBM support confirmed. PrevLow:{current_attempt_low:.5f} (vs First:{first_recorded_support_low:.5f}) near PrevBBM:{prev_bbm_value:.5f}. CurrentClose:{current_price:.5f}. Attempting LONG.")
-                            tgt_side = 'buy'
-                            tp_tgt = bbu if not pd.isna(bbu) and bbu > 0 else None
-                            entry_condition_met = True
-                        else:
+                        if current_attempt_low > first_recorded_support_low: # 추세 강화 조건
+                            # MACD 필터 추가
+                            if current_macd_line < current_macd_signal: # 데드 크로스 상태 (롱 진입 안함)
+                                op_logger.info(f"[{symbol_ws}] LONG entry SKIPPED for {symbol_ccxt} due to MACD Dead Cross (MACD:{current_macd_line:.4f} < Signal:{current_macd_signal:.4f}).")
+                            else:
+                                op_logger.info(f"[{symbol_ws}] Second BBM support confirmed. ContactPrice:{current_attempt_low:.5f} (vs First:{first_recorded_support_low:.5f}) near PrevBBM:{prev_bbm_value:.5f}. CurrentClose:{current_price:.5f}. MACD OK. Attempting LONG.")
+                                tgt_side = 'buy'
+                                tp_tgt = bbu if not pd.isna(bbu) and bbu > 0 else None
+                                entry_condition_met = True
+                        else: # 2차 지지가 1차보다 높지 않음 -> 1차 지지 업데이트
                             op_logger.info(f"[{symbol_ws}] Second BBM support attempt at {current_attempt_low:.5f} NOT higher than first at {first_recorded_support_low:.5f}. Updating first support to current point.")
                             with first_support_details_lock: first_support_details[symbol_ws] = {'timestamp': prev_candle.name, 'price': current_attempt_low}
                             with first_resistance_details_lock: first_resistance_details[symbol_ws] = {'timestamp': None, 'price': None}
-                    else:
-                        op_logger.info(f"[{symbol_ws}] First BBM support confirmed. PrevLow:{prev_candle['low']:.5f} near PrevBBM:{prev_bbm_value:.5f}. CurrentClose:{current_price:.5f}. Waiting for second.")
-                        with first_support_details_lock: first_support_details[symbol_ws] = {'timestamp': prev_candle.name, 'price': prev_candle['low']}
+                    else: # 첫 번째 지지 시도
+                        op_logger.info(f"[{symbol_ws}] First BBM support confirmed. ContactPrice:{current_attempt_low:.5f} near PrevBBM:{prev_bbm_value:.5f}. CurrentClose:{current_price:.5f}. Waiting for second.")
+                        with first_support_details_lock: first_support_details[symbol_ws] = {'timestamp': prev_candle.name, 'price': current_attempt_low}
                         with first_resistance_details_lock: first_resistance_details[symbol_ws] = {'timestamp': None, 'price': None}
+                # 롱 조건 대기 중 가격이 BBM 아래로 강하게 내려가면 상태 초기화
                 elif support_info['price'] is not None and current_price < prev_bbm_value * (1 - BBM_REJECTION_PERCENT * 1.5):
                     op_logger.info(f"[{symbol_ws}] Price broke below BBM after 1st support. Resetting support state. Close:{current_price:.5f}, PrevBBM:{prev_bbm_value:.5f}")
                     with first_support_details_lock: first_support_details[symbol_ws] = {'timestamp': None, 'price': None}
 
+            # --- 진입 실행 ---
             if entry_condition_met and tgt_side and tp_tgt is not None and tp_tgt > 0 and entry_px > 0:
                 expected_profit_ratio = abs(tp_tgt - entry_px) / entry_px
                 total_fee_ratio = 2 * FEE_RATE
@@ -1027,8 +1085,9 @@ if __name__ == "__main__":
         op_logger.error("API Key/Secret not set or placeholder. Configure them. Exiting."); exit()
 
     op_logger.warning("="*30 + f" REAL TRADING MODE - {log_prefix} " + "="*30)
-    op_logger.warning("Strategy: BBM 2nd Rejection(Lower High)/Support(Higher Low) Entry / Dynamic BBands TP / Fixed SL")
-    op_logger.warning(f"Key Settings: BBands({BBANDS_PERIOD},{BBANDS_STDDEV}), BBM_Rejection_Range={BBM_REJECTION_PERCENT*100:.1f}%")
+    op_logger.warning("Strategy: BBM 2nd Rejection(Lower High)/Support(Higher Low) + MACD Filter / Dynamic BBands TP / Fixed SL")
+    op_logger.warning(f"Key Settings: BBands({BBANDS_PERIOD},{BBANDS_STDDEV}), BBM_Rejection_Range={BBM_REJECTION_PERCENT*100:.4f}%") # 소수점 4자리로 변경
+    op_logger.warning(f"             MACD({MACD_FAST_PERIOD},{MACD_SLOW_PERIOD},{MACD_SIGNAL_PERIOD})")
     op_logger.warning(f"             TP Update Delay={POSITION_MONITORING_DELAY_MINUTES}min, Threshold={TP_UPDATE_THRESHOLD_PERCENT}%")
     op_logger.warning(f"             MaxPos={MAX_OPEN_POSITIONS}, Leverage={LEVERAGE}x, Timeframe={TIMEFRAME}, SL={1-LONG_STOP_LOSS_FACTOR:.3%}/{SHORT_STOP_LOSS_FACTOR-1:.3%}")
     op_logger.warning(f"             SymbolUpdateInterval={SYMBOL_UPDATE_INTERVAL_HOURS}h, RESTSyncInterval={REST_SYNC_INTERVAL_MINUTES}min, FeeRate={FEE_RATE}")
