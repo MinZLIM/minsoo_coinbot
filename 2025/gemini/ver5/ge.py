@@ -961,57 +961,84 @@ def _check_entry_conditions_main_tf(symbol_ws, idf):
 
     return tgt_side, tp_tgt, entry_px
 
-def _check_3m_macd_slope_condition(symbol_ws, sym_ccxt, proposed_side):
-    """3분봉 MACD 시그널 라인의 기울기를 확인하여 진입 여부 결정"""
-    op_logger.debug(f"[{symbol_ws}] Checking 3m MACD slope for {proposed_side} entry.")
-    df_3m = None
-    with data_3m_lock: # 3분봉 데이터 임시 로드 또는 기존 데이터 사용
-        if symbol_ws in historical_data_3m and len(historical_data_3m[symbol_ws]) >= MACD_SLOW_PERIOD + MACD_SIGNAL_PERIOD:
-            df_3m = historical_data_3m[symbol_ws].copy()
+def _check_3m_candle_condition(symbol_ws, sym_ccxt, proposed_side):
+    """최근 2개의 3분봉을 확인하여 진입 조건 필터링"""
+    op_logger.debug(f"[{symbol_ws}] Checking 3m candle condition for {proposed_side} entry.")
     
-    if df_3m is None: # 데이터가 없거나 부족하면 새로 가져옴
-        op_logger.debug(f"[{symbol_ws}] Fetching fresh 3m data for slope check.")
-        # MACD 계산에 필요한 최소 캔들 수 + 여유분
-        fetch_limit_3m = MACD_SLOW_PERIOD + MACD_SIGNAL_PERIOD + 50
-        df_3m = fetch_initial_ohlcv(sym_ccxt, timeframe=TIMEFRAME_3M, limit=fetch_limit_3m, for_3m_chart=True)
+    df_to_check = None # 최근 2개 캔들 저장용 DataFrame
 
-    if df_3m is None or df_3m.empty:
-        op_logger.warning(f"[{symbol_ws}] Could not fetch/get 3m data for MACD slope check. Allowing entry by default.")
-        return True # 데이터 없으면 일단 진입 허용 (또는 False로 변경하여 보수적 운영)
-
-    # 3분봉 데이터에 대해 지표 계산 (MACD만 필요)
-    # calculate_indicators 함수는 모든 지표를 계산하지만, 여기서는 MACD만 사용
-    idf_3m = calculate_indicators(df_3m)
-    if idf_3m is None or len(idf_3m) < 2:
-        op_logger.warning(f"[{symbol_ws}] Not enough 3m data to calculate MACD for slope check. Allowing entry by default.")
-        return True
+    with data_3m_lock:
+        if symbol_ws in historical_data_3m:
+            cached_df = historical_data_3m[symbol_ws]
+            if len(cached_df) >= 2:
+                df_to_check = cached_df.iloc[-2:].copy() # 마지막 2개 캔들 복사
+    
+    if df_to_check is None:
+        op_logger.debug(f"[{symbol_ws}] 3m cache insufficient or unavailable. Fetching fresh 3m data (last 5 candles).")
+        # fetch_ohlcv_data는 [timestamp, open, high, low, close, volume] 리스트를 반환
+        raw_ohlcv_3m = fetch_ohlcv_data(sym_ccxt, TIMEFRAME_3M, limit=5) 
+        
+        if raw_ohlcv_3m and len(raw_ohlcv_3m) >= 2:
+            temp_df = pd.DataFrame(raw_ohlcv_3m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            # O, C 컬럼을 숫자형으로 변환
+            temp_df['open'] = pd.to_numeric(temp_df['open'])
+            temp_df['close'] = pd.to_numeric(temp_df['close'])
+            df_to_check = temp_df.iloc[-2:] # 가져온 데이터 중 마지막 2개 사용
+            if len(df_to_check) < 2: # 최종적으로 2개 캔들이 안되면 실패 처리
+                 op_logger.warning(f"[{symbol_ws}] Fetched 3m data resulted in < 2 rows for check. Aborting entry.")
+                 return False
+        else:
+            op_logger.warning(f"[{symbol_ws}] Could not fetch sufficient 3m data (got {len(raw_ohlcv_3m) if raw_ohlcv_3m else 0} candles) for candle condition. Aborting entry.")
+            return False # 데이터 부족 시 진입 불가
 
     try:
-        last_3m = idf_3m.iloc[-1]
-        prev_3m = idf_3m.iloc[-2]
-        curr_macd_signal_3m = last_3m.get('MACD_signal', np.nan)
-        prev_macd_signal_3m = prev_3m.get('MACD_signal', np.nan)
+        # df_to_check는 이제 2개의 행을 가짐. iloc[0]이 더 오래된 캔들, iloc[1]이 최신 캔들.
+        last_candle_open = df_to_check['open'].iloc[1]
+        last_candle_close = df_to_check['close'].iloc[1]
+        prev_candle_open = df_to_check['open'].iloc[0]
+        prev_candle_close = df_to_check['close'].iloc[0]
 
-        if pd.isna(curr_macd_signal_3m) or pd.isna(prev_macd_signal_3m):
-            op_logger.warning(f"[{symbol_ws}] 3m MACD signal is NaN for slope check. Allowing entry by default.")
-            return True
+        if proposed_side == 'buy':
+            # 롱 포지션: 최근 2개 3분봉 중 하나라도 음봉(시가 > 종가)이면 진입 안함
+            is_last_bearish = last_candle_close < last_candle_open
+            is_prev_bearish = prev_candle_close < prev_candle_open
+            if is_last_bearish or is_prev_bearish:
+                op_logger.info(f"[{symbol_ws}] Long entry aborted: Recent 3m candle(s) bearish. "
+                               f"Last: O={last_candle_open:.5f} C={last_candle_close:.5f} (Bearish: {is_last_bearish}), "
+                               f"Prev: O={prev_candle_open:.5f} C={prev_candle_close:.5f} (Bearish: {is_prev_bearish}).")
+                return False
+        elif proposed_side == 'short':
+            # 숏 포지션: 최근 2개 3분봉 중 하나라도 양봉(시가 < 종가)이면 진입 안함
+            is_last_bullish = last_candle_close > last_candle_open
+            is_prev_bullish = prev_candle_close > prev_candle_open
+            if is_last_bullish or is_prev_bullish:
+                op_logger.info(f"[{symbol_ws}] Short entry aborted: Recent 3m candle(s) bullish. "
+                               f"Last: O={last_candle_open:.5f} C={last_candle_close:.5f} (Bullish: {is_last_bullish}), "
+                               f"Prev: O={prev_candle_open:.5f} C={prev_candle_close:.5f} (Bullish: {is_prev_bullish}).")
+                return False
+
+        # 조건 통과 시 로그에 캔들 상세 정보 추가
+        passed_log_details = ""
+        if proposed_side == 'buy':
+            # 롱 포지션 통과: 최근 두 캔들이 음봉이 아니었음
+            passed_log_details = (f"Last: O={last_candle_open:.5f} C={last_candle_close:.5f} (Bearish: {last_candle_close < last_candle_open}), "
+                                  f"Prev: O={prev_candle_open:.5f} C={prev_candle_close:.5f} (Bearish: {prev_candle_close < prev_candle_open}).")
+        elif proposed_side == 'short':
+            # 숏 포지션 통과: 최근 두 캔들이 양봉이 아니었음
+            passed_log_details = (f"Last: O={last_candle_open:.5f} C={last_candle_close:.5f} (Bullish: {last_candle_close > last_candle_open}), "
+                                  f"Prev: O={prev_candle_open:.5f} C={prev_candle_close:.5f} (Bullish: {prev_candle_close > prev_candle_open}).")
+        op_logger.info(f"[{symbol_ws}] 3m candle condition PASSED for {proposed_side} entry. {passed_log_details}")
+        return True
+
     except IndexError:
-        op_logger.warning(f"[{symbol_ws}] Not enough 3m data rows for slope check. Allowing entry by default.")
-        return True
+        op_logger.warning(f"[{symbol_ws}] IndexError accessing 3m candle data from df_to_check (Length: {len(df_to_check) if df_to_check is not None else 'None'}). Aborting entry.")
+        return False
+    except KeyError as e:
+        op_logger.warning(f"[{symbol_ws}] KeyError accessing 3m candle data (missing column? {e}). Aborting entry. Columns: {df_to_check.columns.tolist() if df_to_check is not None else 'None'}")
+        return False
     except Exception as e:
-        op_logger.error(f"[{symbol_ws}] Error accessing 3m indicator data for slope check: {e}. Allowing entry by default.")
-        return True
-
-
-    if proposed_side == 'buy' and curr_macd_signal_3m < prev_macd_signal_3m: # 시그널 하락 중
-        op_logger.info(f"[{symbol_ws}] Long entry aborted: 3m MACD signal is falling (Curr:{curr_macd_signal_3m:.4f}, Prev:{prev_macd_signal_3m:.4f}).")
+        op_logger.error(f"[{symbol_ws}] Error in 3m candle condition check: {e}. Aborting entry.", exc_info=True)
         return False
-    elif proposed_side == 'short' and curr_macd_signal_3m > prev_macd_signal_3m: # 시그널 상승 중
-        op_logger.info(f"[{symbol_ws}] Short entry aborted: 3m MACD signal is rising (Curr:{curr_macd_signal_3m:.4f}, Prev:{prev_macd_signal_3m:.4f}).")
-        return False
-
-    op_logger.debug(f"[{symbol_ws}] 3m MACD slope condition PASSED for {proposed_side} entry.")
-    return True
 
 def _perform_entry_order(symbol_ws, sym_ccxt, tgt_side, entry_px, tp_tgt, now):
     """실제 진입 주문 및 SL/TP 주문 설정, 로컬 상태 저장"""
@@ -1138,10 +1165,9 @@ def process_kline_message_main_tf(symbol_ws, kline_data):
             tgt_side, tp_tgt, entry_px = _check_entry_conditions_main_tf(symbol_ws, idf)
 
             if tgt_side and tp_tgt is not None and tp_tgt > 0 and entry_px > 0:
-                # 3분봉 MACD 기울기 조건 추가 확인
-                if _check_3m_macd_slope_condition(symbol_ws, sym_ccxt, tgt_side):
+                # 새로운 3분봉 캔들 조건 확인
+                if _check_3m_candle_condition(symbol_ws, sym_ccxt, tgt_side):
                     _execute_entry_strategy(symbol_ws, sym_ccxt, tgt_side, entry_px, tp_tgt, now)
-                # else: slope condition failed, log already printed in _check_3m_macd_slope_condition
             elif tgt_side:
                 op_logger.warning(f"[{symbol_ws}] Entry condition met for {tgt_side.upper()} but TP target is invalid (TP:{tp_tgt}, EntryPx:{entry_px}). Skipping entry.")
 
