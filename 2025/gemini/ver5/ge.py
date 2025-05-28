@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-# === 최종 버전 V2.4 (15m MACD/BBM 진입 + 3m MACD 기울기 필터 / 고정 TP 0.8% / 3m MACD 반대 신호 종료) ===
+# === 최종 버전 V2.6 (15m MACD/BBM 진입 + 3m MACD 히스토그램 필터 / 고정 TP 0.8% / 3m MACD 반대 신호 종료) ===
+# === 수정: 3분봉 진입 필터를 MACD 시그널 기울기에서 MACD 히스토그램 조건으로 변경 ===
+# === 수정: calculate_indicators 함수에 MACD 히스토그램 계산 추가 ===
 # === 수정: 1시간 타임아웃 로직 제거 ===
 # === 수정: 포지션 진입 후 3분봉 모니터링 및 반대 MACD 신호 시 포지션 종료 로직 추가 ===
-# === 수정: 포지션 진입 조건에 3분봉 MACD 시그널 기울기 필터 추가 ===
+# === 수정: 포지션 진입 조건에 3분봉 MACD 히스토그램 필터 추가 ===
 # === 수정: 고정 TP를 0.8%로 변경 (로그 접두사 반영) ===
 # === 수정: 동적 TP 업데이트 로직 제거 유지 ===
 # === 수정: 8h 추세 필터, 최소 잔고 체크, 블랙리스트 로직 제거 유지 ===
@@ -33,7 +35,7 @@ except ImportError:
     from pytz import timezone as ZoneInfo
 
 # ==============================================================================
-# 사용자 설정 값 (User Settings) - 수정됨
+# 사용자 설정 값 (User Settings)
 # ==============================================================================
 API_KEY = "" # 실제 API 키로 변경하세요
 API_SECRET = "" # 실제 API 시크릿으로 변경하세요
@@ -66,9 +68,6 @@ LONG_STOP_LOSS_FACTOR = 0.99 # 롱 포지션 손절 비율 (진입가 * 0.99)
 SHORT_STOP_LOSS_FACTOR = 1.01 # 숏 포지션 손절 비율 (진입가 * 1.01)
 
 # --- 기타 설정 ---
-# POSITION_MONITORING_DELAY_MINUTES = 5 # 동적 TP 업데이트 로직 제거로 사용 안 함
-# TP_UPDATE_THRESHOLD_PERCENT = 0.1 # 고정 TP 사용으로 동적 업데이트 로직 제거
-# POSITION_TIMEOUT_HOURS = 1 # 포지션 타임아웃 로직 제거
 REST_SYNC_INTERVAL_MINUTES = 5 # REST API 상태 동기화 주기(분)
 SYMBOL_UPDATE_INTERVAL_HOURS = 2 # 거래 대상 심볼 목록 업데이트 주기(시간)
 API_RETRY_COUNT = 3 # API 호출 실패 시 재시도 횟수
@@ -76,7 +75,6 @@ API_RETRY_DELAY_SECONDS = 2 # API 호출 재시도 간격(초)
 TARGET_ASSET = 'USDT' # 타겟 자산 (테더)
 TIMEFRAME_3M = '3m' # 포지션 모니터링용 3분봉
 TIMEFRAME_3M_MINUTES = 3 # 3분봉 분 단위
-# FEE_RATE = 0.0005 # 예상 수수료율 (현재 진입 조건에서 사용 안 함)
 INITIAL_CANDLE_FETCH_LIMIT = 100 # 초기 캔들 데이터 로드 개수 (지표 계산 위해 충분히 확보)
 MAX_CANDLE_HISTORY = 200 # 메모리에 유지할 최대 캔들 개수 (메인/3분봉 공용)
 KST = ZoneInfo("Asia/Seoul") # 한국 시간대
@@ -88,7 +86,7 @@ pd.set_option('display.max_rows', None); pd.set_option('display.max_columns', No
 # ==============================================================================
 log_dir = os.path.dirname(os.path.abspath(__file__)) # 로그 파일 저장 디렉토리
 log_filename_base = "bot_log" # 로그 파일 기본 이름
-log_prefix = "[15m_MACD_BBM_TP0.8_3mExit_V2.4]" # 로그 메시지 접두사 (전략 및 버전 명시)
+log_prefix = "[15m_MACD_BBM_TP0.8_3mHistoEntry_3mMACDExit_V2.6]" # 로그 메시지 접두사 (전략 및 버전 명시)
 
 # 운영 로그 (Operation Log)
 op_logger = logging.getLogger('operation')
@@ -113,31 +111,29 @@ asset_handler.setFormatter(asset_formatter); asset_logger.addHandler(asset_handl
 # ==============================================================================
 # 전역 변수 및 동기화 객체 (Global Variables & Synchronization Objects)
 # ==============================================================================
-real_positions = {} # 현재 보유 포지션 정보 (딕셔너리: {symbol_ws: position_info})
-real_positions_lock = Lock() # real_positions 접근 동기화를 위한 Lock
-total_trades = 0 # 총 거래 횟수 (동기화 시 업데이트)
-winning_trades = 0 # 승리 거래 횟수 (구현 필요 시 추가)
-stats_lock = Lock() # 통계 변수 접근 동기화를 위한 Lock
-historical_data = {} # 심볼별 과거 캔들 데이터 (딕셔너리: {symbol_ws: DataFrame}) - 메인 타임프레임
-data_lock = Lock() # historical_data 접근 동기화를 위한 Lock
-historical_data_3m = {} # 3분봉 데이터 저장용
-data_3m_lock = Lock() # 3분봉 데이터 접근용 Lock
-entry_in_progress = {} # 현재 진입 시도 중인 심볼 (딕셔너리: {symbol_ws: True})
-entry_lock = Lock() # entry_in_progress 접근 동기화를 위한 Lock
-# timeout_exit_in_progress = {} # 타임아웃 로직 제거
-# timeout_exit_lock = Lock() # 타임아웃 로직 제거
-last_asset_log_time = datetime.now(UTC) # 마지막 자산 로그 기록 시간
-kline_websocket_running = False # K-line 웹소켓 실행 상태 플래그
-kline_wsapp = None # K-line 웹소켓 앱 객체
-subscribed_symbols = set() # 현재 구독 중인 심볼 목록 (웹소켓 형식, e.g., 'BTCUSDT') - 메인 타임프레임
-subscribed_symbols_lock = Lock() # subscribed_symbols 접근 동기화를 위한 Lock
-subscribed_symbols_3m = set() # 3분봉 구독 중인 심볼 목록
-subscribed_symbols_3m_lock = Lock() # 3분봉 구독 목록 접근용 Lock
-shutdown_requested = False # 봇 종료 요청 플래그
-kline_thread = None # K-line 웹소켓 실행 스레드
-symbol_update_thread = None # 심볼 목록 업데이트 스레드
-sync_thread = None # REST 상태 동기화 스레드
-binance_rest = None # CCXT 바이낸스 REST API 객체
+real_positions = {} 
+real_positions_lock = Lock() 
+total_trades = 0 
+winning_trades = 0 
+stats_lock = Lock() 
+historical_data = {} 
+data_lock = Lock() 
+historical_data_3m = {} 
+data_3m_lock = Lock() 
+entry_in_progress = {} 
+entry_lock = Lock() 
+last_asset_log_time = datetime.now(UTC) 
+kline_websocket_running = False 
+kline_wsapp = None 
+subscribed_symbols = set() 
+subscribed_symbols_lock = Lock() 
+subscribed_symbols_3m = set() 
+subscribed_symbols_3m_lock = Lock() 
+shutdown_requested = False 
+kline_thread = None 
+symbol_update_thread = None 
+sync_thread = None 
+binance_rest = None 
 
 # ==============================================================================
 # 심볼 형식 변환 유틸리티 (Symbol Format Conversion Utilities)
@@ -161,22 +157,21 @@ def call_api_with_retry(api_call, max_retries=API_RETRY_COUNT, delay_seconds=API
     retries = 0
     while retries < max_retries:
         try:
-            return api_call() # API 호출 시도
-        except (RequestTimeout, ExchangeNotAvailable, OnMaintenance, NetworkError, ExchangeError) as e: # 재시도 가능한 네트워크/거래소 오류
+            return api_call() 
+        except (RequestTimeout, ExchangeNotAvailable, OnMaintenance, NetworkError, ExchangeError) as e: 
             retries += 1
             op_logger.warning(f"{error_message}. Retry {retries}/{max_retries} after {delay_seconds}s. Error: {e}")
             if retries < max_retries:
                 time.sleep(delay_seconds)
             else:
                 op_logger.error(f"{error_message}. Max retries reached.")
-                raise e # 최대 재시도 횟수 도달 시 예외 발생
-        except AuthenticationError as auth_e: # 인증 오류는 재시도 불가
+                raise e 
+        except AuthenticationError as auth_e: 
             op_logger.error(f"Auth Error during {error_message}: {auth_e}. Cannot retry.")
             raise auth_e
-        except Exception as e: # 예상치 못한 오류
+        except Exception as e: 
             op_logger.error(f"Unexpected error during {error_message}: {e}", exc_info=True)
             raise e
-    # 루프를 비정상적으로 빠져나온 경우 (이론상 발생하면 안됨)
     raise Exception(f"{error_message}. Unexpected exit from retry loop.")
 
 # ==============================================================================
@@ -193,14 +188,13 @@ def initialize_binance_rest():
         binance_rest = ccxt.binance({
             'apiKey': API_KEY,
             'secret': API_SECRET,
-            'enableRateLimit': True, # API 속도 제한 자동 처리 활성화
+            'enableRateLimit': True, 
             'options': {
-                'defaultType': 'future', # 기본 거래 타입을 선물로 설정
-                'adjustForTimeDifference': True # 클라이언트- 서버 시간 차이 자동 보정
+                'defaultType': 'future', 
+                'adjustForTimeDifference': True 
             }
         })
-        binance_rest.load_markets() # 마켓 정보 로드
-        # 서버 시간 확인 (API 연결 및 시간 동기화 검증)
+        binance_rest.load_markets() 
         server_time = call_api_with_retry(lambda: binance_rest.fetch_time(), error_message="fetch_time")
         op_logger.info(f"Server time: {datetime.fromtimestamp(server_time / 1000, tz=UTC)}")
         op_logger.info("CCXT REST initialized.")
@@ -216,12 +210,9 @@ def get_current_balance(asset=TARGET_ASSET):
     """지정된 자산의 사용 가능 잔고를 조회 (선물 지갑)"""
     if not binance_rest: return 0.0
     try:
-        # fetch_balance API 호출 (재시도 포함)
         balance = call_api_with_retry(lambda: binance_rest.fetch_balance(params={'type': 'future'}), error_message="fetch_balance")
-        # 'free' 딕셔너리에서 해당 자산의 잔고 반환, 없으면 0.0
         return float(balance['free'].get(asset, 0.0))
     except Exception as e:
-        # 재시도 후에도 실패 시 에러 로그 기록
         op_logger.error(f"Unexpected error fetching balance after retries: {e}")
         return 0.0
 
@@ -230,9 +221,7 @@ def get_top_volume_symbols(n=TOP_N_SYMBOLS):
     if not binance_rest: return []
     op_logger.info(f"Fetching top {n} symbols by volume...")
     try:
-        # 모든 티커 정보 조회 (재시도 포함)
         tickers = call_api_with_retry(lambda: binance_rest.fetch_tickers(), error_message="fetch_tickers")
-        # USDT 선물 마켓 필터링 (심볼 형식: BASE/QUOTE:SETTLE, e.g., BTC/USDT:USDT)
         futures_tickers = {
             s: t for s, t in tickers.items()
             if '/' in s and s.endswith(f"/{TARGET_ASSET}:{TARGET_ASSET}") and t.get('quoteVolume') is not None
@@ -240,14 +229,11 @@ def get_top_volume_symbols(n=TOP_N_SYMBOLS):
         if not futures_tickers:
             op_logger.warning("No USDT futures tickers found.")
             return []
-        # 'quoteVolume' (거래대금) 기준으로 내림차순 정렬
         sorted_tickers = sorted(futures_tickers.values(), key=lambda x: x.get('quoteVolume', 0), reverse=True)
-        # 상위 N개 심볼 추출 (CCXT 형식, e.g., 'BTC/USDT')
         top_symbols_ccxt = [t['symbol'].split(':')[0] for t in sorted_tickers[:n]]
         op_logger.info(f"Fetched top {len(top_symbols_ccxt)} symbols.")
         return top_symbols_ccxt
     except Exception as e:
-        # 재시도 후에도 실패 시 에러 로그 기록
         op_logger.error(f"Error fetching top symbols after retries: {e}")
         return []
 
@@ -271,19 +257,19 @@ def fetch_ohlcv_data(symbol_ccxt, timeframe, limit):
 def fetch_initial_ohlcv(symbol_ccxt, timeframe=TIMEFRAME, limit=INITIAL_CANDLE_FETCH_LIMIT, for_3m_chart=False):
     """지정된 심볼의 초기 OHLCV 데이터를 조회하여 DataFrame으로 반환"""
     stochrsi_buffer = STOCHRSI_LENGTH + STOCHRSI_RSI_LENGTH + 50
-    macd_buffer = MACD_SLOW_PERIOD + MACD_SIGNAL_PERIOD + 50 # MACD 계산을 위한 버퍼
+    macd_buffer = MACD_SLOW_PERIOD + MACD_SIGNAL_PERIOD + 50 
     bbands_buffer = BBANDS_PERIOD + 50
-    # 3분봉은 MACD만 필요할 수 있으므로, BBands/StochRSI 버퍼는 선택적으로
     actual_limit = max(limit, macd_buffer, (bbands_buffer if not for_3m_chart else 0), (stochrsi_buffer if not for_3m_chart else 0))
 
     ohlcv = fetch_ohlcv_data(symbol_ccxt, timeframe, actual_limit)
     if not ohlcv: return None
 
     try:
-        # DataFrame 생성 및 전처리
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True) # 타임스탬프 변환 (UTC 기준)
-        df.set_index('timestamp', inplace=True) # 타임스탬프를 인덱스로 설정
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True) 
+        df.set_index('timestamp', inplace=True) 
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col])
         op_logger.debug(f"Successfully processed {len(df)} initial candles for {symbol_ccxt} ({timeframe}).")
         return df
     except Exception as e:
@@ -292,22 +278,19 @@ def fetch_initial_ohlcv(symbol_ccxt, timeframe=TIMEFRAME, limit=INITIAL_CANDLE_F
 
 
 def calculate_indicators(df):
-    """주어진 DataFrame에 기술적 지표(Stochastic RSI, Bollinger Bands, MACD)를 계산하여 추가"""
-    # 필요한 최소 길이 계산 시, 모든 지표가 계산될 수 있도록 충분한 버퍼를 고려
-    # MACD가 가장 긴 기간을 요구할 수 있음 (slow + signal + 약간의 안정화 기간)
-    # pandas-ta는 내부적으로 NaN을 처리하므로, 실제로는 (slow + signal - 1) + 몇 개 정도면 충분
-    min_len_macd = MACD_SLOW_PERIOD + MACD_SIGNAL_PERIOD + 10 # 여유분 추가
-    min_len_stochrsi = STOCHRSI_LENGTH + STOCHRSI_RSI_LENGTH + STOCHRSI_D + 10 # 여유분 추가
-    min_len_bbands = BBANDS_PERIOD + 10 # 여유분 추가
+    """주어진 DataFrame에 기술적 지표(Stochastic RSI, Bollinger Bands, MACD, MACD Histogram)를 계산하여 추가"""
+    min_len_macd = MACD_SLOW_PERIOD + MACD_SIGNAL_PERIOD + 10 
+    min_len_stochrsi = STOCHRSI_LENGTH + STOCHRSI_RSI_LENGTH + STOCHRSI_D + 10 
+    min_len_bbands = BBANDS_PERIOD + 10 
     required_len = max(min_len_macd, min_len_stochrsi, min_len_bbands)
 
     if df is None or len(df) < required_len:
         op_logger.debug(f"Not enough data for indicators: Have {len(df) if df is not None else 0}, Need >{required_len}")
         return None
     try:
-        df_copy = df.copy() # 원본 DataFrame 변경 방지
+        df_copy = df.copy() 
 
-        # Stochastic RSI 계산 (사용자 요청 파라미터 적용)
+        # Stochastic RSI 계산
         df_copy.ta.stochrsi(length=STOCHRSI_LENGTH, rsi_length=STOCHRSI_RSI_LENGTH, k=STOCHRSI_K, d=STOCHRSI_D, append=True)
         stoch_k_col_orig = f'STOCHRSIk_{STOCHRSI_LENGTH}_{STOCHRSI_RSI_LENGTH}_{STOCHRSI_K}_{STOCHRSI_D}'
         stoch_d_col_orig = f'STOCHRSId_{STOCHRSI_LENGTH}_{STOCHRSI_RSI_LENGTH}_{STOCHRSI_K}_{STOCHRSI_D}'
@@ -318,39 +301,38 @@ def calculate_indicators(df):
         bbm_col_orig = f'BBM_{BBANDS_PERIOD}_{float(BBANDS_STDDEV)}'
         bbu_col_orig = f'BBU_{BBANDS_PERIOD}_{float(BBANDS_STDDEV)}'
 
-        # MACD 계산
+        # MACD 계산 (히스토그램 포함)
         df_copy.ta.macd(fast=MACD_FAST_PERIOD, slow=MACD_SLOW_PERIOD, signal=MACD_SIGNAL_PERIOD, append=True)
         macd_line_col_orig = f'MACD_{MACD_FAST_PERIOD}_{MACD_SLOW_PERIOD}_{MACD_SIGNAL_PERIOD}'
         macd_signal_col_orig = f'MACDs_{MACD_FAST_PERIOD}_{MACD_SLOW_PERIOD}_{MACD_SIGNAL_PERIOD}'
+        macd_hist_col_orig = f'MACDh_{MACD_FAST_PERIOD}_{MACD_SLOW_PERIOD}_{MACD_SIGNAL_PERIOD}' # MACD 히스토그램 컬럼
 
-        # 컬럼 이름 변경 (짧고 일관된 이름으로)
+        # 컬럼 이름 변경
         rename_map = {
             stoch_k_col_orig: 'STOCHk', stoch_d_col_orig: 'STOCHd',
             bbl_col_orig: 'BBL', bbm_col_orig: 'BBM', bbu_col_orig: 'BBU',
-            macd_line_col_orig: 'MACD_line', macd_signal_col_orig: 'MACD_signal'
+            macd_line_col_orig: 'MACD_line', macd_signal_col_orig: 'MACD_signal',
+            macd_hist_col_orig: 'MACD_hist' # 히스토그램 컬럼 이름 변경
         }
         existing_rename_map = {k: v for k, v in rename_map.items() if k in df_copy.columns}
-        # 모든 원본 컬럼이 생성되었는지 확인 (MACD, BBands, StochRSI 모두)
-        # MACD, BBands는 진입 조건에 사용되므로 필수
-        # StochRSI는 현재 사용 안 하지만, calculate_indicators 함수 자체는 모든 지표를 계산하도록 유지
-        required_orig_cols = [bbl_col_orig, bbm_col_orig, bbu_col_orig, macd_line_col_orig, macd_signal_col_orig]
+        
+        required_orig_cols = [bbl_col_orig, bbm_col_orig, bbu_col_orig, macd_line_col_orig, macd_signal_col_orig, macd_hist_col_orig]
         if not all(col in df_copy.columns for col in required_orig_cols):
              op_logger.warning(f"Not all required original indicator columns were generated. Expected: {required_orig_cols}, Available: {df_copy.columns.tolist()}")
              return None
 
         df_copy.rename(columns=existing_rename_map, inplace=True)
 
-        # 필요한 최종 지표 컬럼 존재 여부 확인 (MACD, BBands)
-        required_final_cols = ['BBL', 'BBM', 'BBU', 'MACD_line', 'MACD_signal']
+        required_final_cols = ['BBL', 'BBM', 'BBU', 'MACD_line', 'MACD_signal', 'MACD_hist']
         if not all(col in df_copy.columns for col in required_final_cols):
             op_logger.warning(f"Required final indicator columns missing after rename. Needed: {required_final_cols}, Have: {df_copy.columns.tolist()}")
             return None
 
-        # 최근 2개 캔들의 MACD 값과 최근 1개 캔들의 BBands 값에 NaN이 있는지 확인
+        # 최근 2개 캔들의 MACD 값 (라인, 시그널, 히스토그램)과 최근 1개 캔들의 BBands 값에 NaN이 있는지 확인
         if len(df_copy) < 2 or \
-           df_copy[['MACD_line', 'MACD_signal']].iloc[-2:].isnull().any().any() or \
+           df_copy[['MACD_line', 'MACD_signal', 'MACD_hist']].iloc[-2:].isnull().any().any() or \
            df_copy[['BBL', 'BBM', 'BBU']].iloc[-1].isnull().any():
-            op_logger.debug(f"Latest or previous indicator values (MACD, BBands) contain NaN.")
+            op_logger.debug(f"Latest or previous indicator values (MACD, BBands, MACD_hist) contain NaN.")
             return None
 
         return df_copy
@@ -363,7 +345,6 @@ def set_isolated_margin(symbol_ccxt, leverage):
     if not binance_rest: return False
     op_logger.info(f"Setting ISOLATED margin for {symbol_ccxt} / {leverage}x...")
     try:
-        # 1. 마진 모드 설정 시도
         try:
             binance_rest.set_margin_mode('ISOLATED', symbol_ccxt, params={})
             op_logger.info(f"Margin mode successfully set to ISOLATED for {symbol_ccxt}.")
@@ -378,7 +359,6 @@ def set_isolated_margin(symbol_ccxt, leverage):
                 op_logger.error(f"Failed to set margin mode for {symbol_ccxt}: {e}")
                 return False
 
-        # 2. 레버리지 설정 시도
         try:
             binance_rest.set_leverage(leverage, symbol_ccxt, params={})
             op_logger.info(f"Leverage successfully set to {leverage}x for {symbol_ccxt}.")
@@ -544,22 +524,20 @@ def log_asset_status():
     """현재 자산 상태 (잔고, 활성 포지션, 통계)를 주기적으로 로깅"""
     global last_asset_log_time
     now = datetime.now(UTC)
-    # 마지막 로그 시간으로부터 1시간 이상 경과 시 실행
     if now - last_asset_log_time >= timedelta(hours=1):
         try:
-            bal = get_current_balance() # 현재 잔고 조회
+            bal = get_current_balance() 
             bal_str = f"{bal:.2f}" if bal is not None else "Error"
-            with stats_lock: # 통계 변수 접근 (Lock 사용)
+            with stats_lock: 
                 trades, wins = total_trades, winning_trades
-            win_rate = (wins / trades * 100) if trades > 0 else 0.0 # 승률 계산
+            win_rate = (wins / trades * 100) if trades > 0 else 0.0 
             active_pos = []
             num_active = 0
-            with real_positions_lock: # 포지션 정보 접근 (Lock 사용)
-                active_pos = list(real_positions.keys()) # 활성 포지션 심볼 목록
-                num_active = len(real_positions) # 활성 포지션 개수
-            # 자산 로그 기록
+            with real_positions_lock: 
+                active_pos = list(real_positions.keys()) 
+                num_active = len(real_positions) 
             asset_logger.info(f"Balance:{bal_str} {TARGET_ASSET}, Active Positions:{num_active} {active_pos}, Total Trades:{trades}(Delayed), Winning Trades:{wins}(Delayed), Win Rate:{win_rate:.2f}%")
-            last_asset_log_time = now # 마지막 로그 시간 업데이트
+            last_asset_log_time = now 
         except Exception as e:
             asset_logger.error(f"Error logging asset status: {e}", exc_info=True)
 
@@ -640,7 +618,6 @@ def _handle_local_only_positions(local_only_symbols, local_pos_dict):
                 with stats_lock: total_trades += 1
                 op_logger.info(f"[{symbol_ws}] Cancelling orphaned orders for {symbol_ccxt}...")
                 cancel_open_orders_for_symbol(symbol_ccxt)
-                # 3분봉 구독 해제 시도
                 unsubscribe_from_3m_kline(symbol_ws)
 
 
@@ -794,7 +771,6 @@ def update_top_symbols_periodically(interval_seconds):
             to_add = new_sym_ws - current_subs
             to_remove = current_subs - new_sym_ws
 
-            # 제거할 심볼 처리 (메인 타임프레임 구독 해제)
             if to_remove:
                 op_logger.info(f"[Symbol Update] Symbols to remove (Main TF): {to_remove}")
                 streams_to_unsub = [f"{s.lower()}@kline_{TIMEFRAME}" for s in to_remove]
@@ -809,7 +785,6 @@ def update_top_symbols_periodically(interval_seconds):
                     except Exception as e:
                         op_logger.error(f"[Symbol Update] Failed to send UNSUBSCRIBE message: {e}")
 
-                # 내부 구독 목록 및 과거 데이터에서 제거
                 with subscribed_symbols_lock:
                     subscribed_symbols -= to_remove
                 removed_count = 0
@@ -819,7 +794,6 @@ def update_top_symbols_periodically(interval_seconds):
                             removed_count += 1
                 op_logger.info(f"[Symbol Update] Removed historical data for {removed_count} symbols.")
 
-            # 추가할 심볼 처리 (메인 타임프레임 구독 및 초기 데이터 로드)
             if to_add:
                 op_logger.info(f"[Symbol Update] Symbols to add (Main TF): {to_add}")
                 fetched_count, error_count = 0, 0
@@ -827,7 +801,6 @@ def update_top_symbols_periodically(interval_seconds):
                 for symbol_ws in to_add:
                     if shutdown_requested: break
                     ccxt_symbol = convert_symbol_to_ccxt(symbol_ws)
-                    # fetch_initial_ohlcv 내부에서 필요한 limit 계산
                     df = fetch_initial_ohlcv(ccxt_symbol, TIMEFRAME)
                     if df is not None and not df.empty:
                         with data_lock:
@@ -840,7 +813,6 @@ def update_top_symbols_periodically(interval_seconds):
                     time.sleep(0.3)
                 op_logger.info(f"[Symbol Update] Fetched initial data for {fetched_count} new symbols ({error_count} errors).")
 
-                # 데이터 로드 성공한 심볼만 웹소켓 구독
                 if added_to_data:
                     streams_to_sub = [f"{s.lower()}@kline_{TIMEFRAME}" for s in added_to_data]
                     msg = {"method": "SUBSCRIBE", "params": streams_to_sub, "id": int(time.time())}
@@ -852,17 +824,15 @@ def update_top_symbols_periodically(interval_seconds):
                                 subscribed_symbols.update(added_to_data)
                         else:
                             op_logger.warning("[Symbol Update] K-line WebSocket disconnected before sending SUBSCRIBE for new symbols.")
-                            # 구독 실패 시 데이터 롤백 (데이터만 있고 구독 안되면 문제)
                             with data_lock:
                                 for s in added_to_data: historical_data.pop(s, None)
                     except Exception as e:
                         op_logger.error(f"[Symbol Update] Failed to send SUBSCRIBE message for new symbols: {e}")
-                         # 구독 실패 시 데이터 롤백
                         with data_lock:
                             for s in added_to_data: historical_data.pop(s, None)
 
 
-            with subscribed_symbols_lock: # 최종 메인 타임프레임 구독 수 확인
+            with subscribed_symbols_lock: 
                 current_count = len(subscribed_symbols)
             op_logger.info(f"[Symbol Update] Finished symbol update cycle. Currently subscribed to {current_count} main timeframe symbols.")
 
@@ -877,11 +847,9 @@ def update_top_symbols_periodically(interval_seconds):
 # ==============================================================================
 def update_historical_data(symbol_ws, kline_data, data_dict_to_update, lock_for_data, max_history_len):
     """수신된 K-line 데이터로 해당 심볼의 과거 데이터 DataFrame을 업데이트"""
-    # global historical_data # 이제 파라미터로 받음
     try:
-        with lock_for_data: # 해당 데이터 딕셔너리에 맞는 Lock 사용
+        with lock_for_data: 
             if symbol_ws not in data_dict_to_update:
-                # op_logger.debug(f"[{symbol_ws}] Received kline but symbol not in its historical_data dict. Skipping update.")
                 return False
 
             df = data_dict_to_update[symbol_ws]
@@ -900,24 +868,20 @@ def update_historical_data(symbol_ws, kline_data, data_dict_to_update, lock_for_
                 df.loc[k_time] = new_data_row.iloc[0]
             else:
                 df = pd.concat([df, new_data_row])
-                df = df.iloc[-max_history_len:] # 최대 캔들 개수 유지
-            data_dict_to_update[symbol_ws] = df # 업데이트된 DataFrame 저장
+                df = df.iloc[-max_history_len:] 
+            data_dict_to_update[symbol_ws] = df 
             return True
     except Exception as e:
         op_logger.error(f"[{symbol_ws}] Error updating historical data: {e}")
         return False
 
-# def try_update_tp(...): # 동적 TP 업데이트 로직 삭제
-
 def _check_entry_conditions_main_tf(symbol_ws, idf):
     """진입 조건(MACD 교차 및 BBM 기준)을 확인하고 진입 방향과 새로운 TP 목표를 반환"""
-    # global real_positions, entry_in_progress # 이 함수 내에서는 직접 사용 안 함
-
     with subscribed_symbols_lock:
-        if symbol_ws not in subscribed_symbols: # 메인 타임프레임 구독 확인
+        if symbol_ws not in subscribed_symbols: 
             return None, None, None
 
-    with data_lock: # 메인 타임프레임 데이터 사용
+    with data_lock: 
         df = historical_data.get(symbol_ws)
     if df is None: return None, None, None
 
@@ -928,12 +892,11 @@ def _check_entry_conditions_main_tf(symbol_ws, idf):
         last = idf.iloc[-1]
         prev = idf.iloc[-2]
 
-        entry_px = last['close'] # 진입 가격은 현재 캔들 종가
+        entry_px = last['close'] 
         bbm = last.get('BBM', np.nan)
         curr_macd_line, prev_macd_line = last.get('MACD_line', np.nan), prev.get('MACD_line', np.nan)
         curr_macd_signal, prev_macd_signal = last.get('MACD_signal', np.nan), prev.get('MACD_signal', np.nan)
 
-        # 필수 값들이 NaN인지 확인
         if any(pd.isna(v) for v in [entry_px, bbm, curr_macd_line, prev_macd_line, curr_macd_signal, prev_macd_signal]):
             op_logger.debug(f"[{symbol_ws}] Required values for MACD entry check contain NaN.")
             return None, None, None
@@ -946,99 +909,89 @@ def _check_entry_conditions_main_tf(symbol_ws, idf):
     tgt_side = None
     tp_tgt = None
 
-    # MACD 조건 계산
     macd_golden_cross = (prev_macd_line <= prev_macd_signal and curr_macd_line > curr_macd_signal)
     macd_dead_cross = (prev_macd_line >= prev_macd_signal and curr_macd_line < curr_macd_signal)
 
     if macd_golden_cross and entry_px < bbm:
         tgt_side = 'buy'
-        tp_tgt = entry_px * 1.008 # 고정 0.8% TP
+        tp_tgt = entry_px * 1.008 
         op_logger.info(f"[{symbol_ws}] Long entry: MACD Golden Cross (L:{curr_macd_line:.4f}, S:{curr_macd_signal:.4f}) AND Price ({entry_px:.5f}) < BBM ({bbm:.5f}). TP: {tp_tgt:.5f}.")
     elif macd_dead_cross and entry_px > bbm:
         tgt_side = 'sell'
-        tp_tgt = entry_px * 0.992 # 고정 0.8% TP
+        tp_tgt = entry_px * 0.992 
         op_logger.info(f"[{symbol_ws}] Short entry: MACD Dead Cross (L:{curr_macd_line:.4f}, S:{curr_macd_signal:.4f}) AND Price ({entry_px:.5f}) > BBM ({bbm:.5f}). TP: {tp_tgt:.5f}.")
 
     return tgt_side, tp_tgt, entry_px
 
-def _check_3m_candle_condition(symbol_ws, sym_ccxt, proposed_side):
-    """최근 2개의 3분봉을 확인하여 진입 조건 필터링"""
-    op_logger.debug(f"[{symbol_ws}] Checking 3m candle condition for {proposed_side} entry.")
+def _check_3m_macd_histogram_condition(symbol_ws, sym_ccxt, proposed_side): # 함수명 및 로직 수정
+    """3분봉 MACD 히스토그램을 확인하여 진입 조건 필터링"""
+    op_logger.debug(f"[{symbol_ws}] Checking 3m MACD histogram condition for {proposed_side} entry.")
     
-    df_to_check = None # 최근 2개 캔들 저장용 DataFrame
-
+    required_3m_candles = MACD_SLOW_PERIOD + MACD_SIGNAL_PERIOD + 20 
+    
+    df_3m = None
     with data_3m_lock:
-        if symbol_ws in historical_data_3m:
-            cached_df = historical_data_3m[symbol_ws]
-            if len(cached_df) >= 2:
-                df_to_check = cached_df.iloc[-2:].copy() # 마지막 2개 캔들 복사
-    
-    if df_to_check is None:
-        op_logger.debug(f"[{symbol_ws}] 3m cache insufficient or unavailable. Fetching fresh 3m data (last 5 candles).")
-        # fetch_ohlcv_data는 [timestamp, open, high, low, close, volume] 리스트를 반환
-        raw_ohlcv_3m = fetch_ohlcv_data(sym_ccxt, TIMEFRAME_3M, limit=5) 
+        if symbol_ws in historical_data_3m and len(historical_data_3m[symbol_ws]) >= required_3m_candles:
+            df_3m = historical_data_3m[symbol_ws].copy()
+            op_logger.debug(f"[{symbol_ws}] Using cached 3m data ({len(df_3m)} candles) for MACD histogram check.")
+
+    if df_3m is None:
+        op_logger.debug(f"[{symbol_ws}] Cached 3m data insufficient. Fetching fresh 3m data ({INITIAL_CANDLE_FETCH_LIMIT} candles).")
+        raw_ohlcv_3m = fetch_ohlcv_data(sym_ccxt, TIMEFRAME_3M, limit=INITIAL_CANDLE_FETCH_LIMIT) 
         
-        if raw_ohlcv_3m and len(raw_ohlcv_3m) >= 2:
-            temp_df = pd.DataFrame(raw_ohlcv_3m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            # O, C 컬럼을 숫자형으로 변환
-            temp_df['open'] = pd.to_numeric(temp_df['open'])
-            temp_df['close'] = pd.to_numeric(temp_df['close'])
-            df_to_check = temp_df.iloc[-2:] # 가져온 데이터 중 마지막 2개 사용
-            if len(df_to_check) < 2: # 최종적으로 2개 캔들이 안되면 실패 처리
-                 op_logger.warning(f"[{symbol_ws}] Fetched 3m data resulted in < 2 rows for check. Aborting entry.")
-                 return False
+        if raw_ohlcv_3m and len(raw_ohlcv_3m) >= required_3m_candles:
+            df_3m = pd.DataFrame(raw_ohlcv_3m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df_3m['timestamp'] = pd.to_datetime(df_3m['timestamp'], unit='ms', utc=True)
+            df_3m.set_index('timestamp', inplace=True)
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df_3m[col] = pd.to_numeric(df_3m[col])
+            op_logger.debug(f"[{symbol_ws}] Fetched and processed {len(df_3m)} fresh 3m candles for histogram check.")
         else:
-            op_logger.warning(f"[{symbol_ws}] Could not fetch sufficient 3m data (got {len(raw_ohlcv_3m) if raw_ohlcv_3m else 0} candles) for candle condition. Aborting entry.")
-            return False # 데이터 부족 시 진입 불가
+            op_logger.warning(f"[{symbol_ws}] Could not fetch sufficient fresh 3m data for histogram (got {len(raw_ohlcv_3m) if raw_ohlcv_3m else 0}, needed {required_3m_candles}). Filter fails.")
+            return False
 
     try:
-        # df_to_check는 이제 2개의 행을 가짐. iloc[0]이 더 오래된 캔들, iloc[1]이 최신 캔들.
-        last_candle_open = df_to_check['open'].iloc[1]
-        last_candle_close = df_to_check['close'].iloc[1]
-        prev_candle_open = df_to_check['open'].iloc[0]
-        prev_candle_close = df_to_check['close'].iloc[0]
+        # calculate_indicators 함수는 MACD 히스토그램을 'MACD_hist'로 저장
+        # 여기서는 3분봉 데이터에 대해 직접 MACD를 계산하고 히스토그램 컬럼 이름을 사용
+        idf_3m_for_histo = calculate_indicators(df_3m.copy()) # calculate_indicators가 'MACD_hist'를 생성
+        if idf_3m_for_histo is None or idf_3m_for_histo.empty:
+            op_logger.warning(f"[{symbol_ws}] MACD calculation on 3m data returned empty for histogram. Columns: {df_3m.columns.tolist()}")
+            return False
+        
+        if 'MACD_hist' not in idf_3m_for_histo.columns:
+            op_logger.warning(f"[{symbol_ws}] 'MACD_hist' column not found after 3m indicator calculation. Available: {idf_3m_for_histo.columns.tolist()}")
+            return False
 
-        if proposed_side == 'buy':
-            # 롱 포지션: 최근 2개 3분봉 중 하나라도 음봉(시가 > 종가)이면 진입 안함
-            is_last_bearish = last_candle_close < last_candle_open
-            is_prev_bearish = prev_candle_close < prev_candle_open
-            if is_last_bearish or is_prev_bearish:
-                op_logger.info(f"[{symbol_ws}] Long entry aborted: Recent 3m candle(s) bearish. "
-                               f"Last: O={last_candle_open:.5f} C={last_candle_close:.5f} (Bearish: {is_last_bearish}), "
-                               f"Prev: O={prev_candle_open:.5f} C={prev_candle_close:.5f} (Bearish: {is_prev_bearish}).")
-                return False
-        elif proposed_side == 'short':
-            # 숏 포지션: 최근 2개 3분봉 중 하나라도 양봉(시가 < 종가)이면 진입 안함
-            is_last_bullish = last_candle_close > last_candle_open
-            is_prev_bullish = prev_candle_close > prev_candle_open
-            if is_last_bullish or is_prev_bullish:
-                op_logger.info(f"[{symbol_ws}] Short entry aborted: Recent 3m candle(s) bullish. "
-                               f"Last: O={last_candle_open:.5f} C={last_candle_close:.5f} (Bullish: {is_last_bullish}), "
-                               f"Prev: O={prev_candle_open:.5f} C={prev_candle_close:.5f} (Bullish: {is_prev_bullish}).")
-                return False
+        if len(idf_3m_for_histo['MACD_hist'].dropna()) < 2 or idf_3m_for_histo['MACD_hist'].iloc[-2:].isnull().any():
+            op_logger.warning(f"[{symbol_ws}] Not enough valid 3m MACD histogram values. Last two: {idf_3m_for_histo['MACD_hist'].iloc[-2:].tolist()}")
+            return False
 
-        # 조건 통과 시 로그에 캔들 상세 정보 추가
-        passed_log_details = ""
-        if proposed_side == 'buy':
-            # 롱 포지션 통과: 최근 두 캔들이 음봉이 아니었음
-            passed_log_details = (f"Last: O={last_candle_open:.5f} C={last_candle_close:.5f} (Bearish: {last_candle_close < last_candle_open}), "
-                                  f"Prev: O={prev_candle_open:.5f} C={prev_candle_close:.5f} (Bearish: {prev_candle_close < prev_candle_open}).")
-        elif proposed_side == 'short':
-            # 숏 포지션 통과: 최근 두 캔들이 양봉이 아니었음
-            passed_log_details = (f"Last: O={last_candle_open:.5f} C={last_candle_close:.5f} (Bullish: {last_candle_close > last_candle_open}), "
-                                  f"Prev: O={prev_candle_open:.5f} C={prev_candle_close:.5f} (Bullish: {prev_candle_close > prev_candle_open}).")
-        op_logger.info(f"[{symbol_ws}] 3m candle condition PASSED for {proposed_side} entry. {passed_log_details}")
-        return True
+        current_hist = idf_3m_for_histo['MACD_hist'].iloc[-1]
+        prev_hist = idf_3m_for_histo['MACD_hist'].iloc[-2]
 
-    except IndexError:
-        op_logger.warning(f"[{symbol_ws}] IndexError accessing 3m candle data from df_to_check (Length: {len(df_to_check) if df_to_check is not None else 'None'}). Aborting entry.")
-        return False
-    except KeyError as e:
-        op_logger.warning(f"[{symbol_ws}] KeyError accessing 3m candle data (missing column? {e}). Aborting entry. Columns: {df_to_check.columns.tolist() if df_to_check is not None else 'None'}")
-        return False
     except Exception as e:
-        op_logger.error(f"[{symbol_ws}] Error in 3m candle condition check: {e}. Aborting entry.", exc_info=True)
+        op_logger.error(f"[{symbol_ws}] Error during 3m MACD histogram calculation/access: {e}", exc_info=True)
         return False
+
+    if proposed_side == 'buy':
+        # 조건: 최근 히스토그램이 이전 히스토그램보다 커야 함
+        if current_hist > prev_hist:
+            op_logger.info(f"[{symbol_ws}] Long entry 3m MACD histogram PASSED (PrevH: {prev_hist:.4f}, CurrH: {current_hist:.4f} - current > prev).")
+            return True
+        else:
+            op_logger.info(f"[{symbol_ws}] Long entry filtered out by 3m MACD histogram (PrevH: {prev_hist:.4f}, CurrH: {current_hist:.4f}). Condition current > prev FAILED.")
+            return False
+    elif proposed_side == 'short':
+        # 조건: 최근 히스토그램이 이전 히스토그램보다 작아야 함
+        if current_hist < prev_hist:
+            op_logger.info(f"[{symbol_ws}] Short entry 3m MACD histogram PASSED (PrevH: {prev_hist:.4f}, CurrH: {current_hist:.4f} - current < prev).")
+            return True
+        else:
+            op_logger.info(f"[{symbol_ws}] Short entry filtered out by 3m MACD histogram (PrevH: {prev_hist:.4f}, CurrH: {current_hist:.4f}). Condition current < prev FAILED.")
+            return False
+    
+    return False
+
 
 def _perform_entry_order(symbol_ws, sym_ccxt, tgt_side, entry_px, tp_tgt, now):
     """실제 진입 주문 및 SL/TP 주문 설정, 로컬 상태 저장"""
@@ -1070,7 +1023,7 @@ def _perform_entry_order(symbol_ws, sym_ccxt, tgt_side, entry_px, tp_tgt, now):
 
         sl_order, tp_order = None, None
         final_sl_price = entry_px * (LONG_STOP_LOSS_FACTOR if tgt_side == 'buy' else SHORT_STOP_LOSS_FACTOR)
-        final_tp_price = tp_tgt # _check_entry_conditions에서 계산된 고정 TP 사용
+        final_tp_price = tp_tgt 
         sl_tp_side = 'sell' if tgt_side == 'buy' else 'buy'
 
         sl_order = place_stop_market_order(sym_ccxt, sl_tp_side, final_sl_price, entry_amount)
@@ -1091,10 +1044,9 @@ def _perform_entry_order(symbol_ws, sym_ccxt, tgt_side, entry_px, tp_tgt, now):
                     'sl_order_id': sl_order['id'], 'sl_client_order_id': sl_order.get('clientOrderId'),
                     'tp_order_id': tp_order['id'] if tp_order and tp_order.get('id') else None,
                     'tp_client_order_id': tp_order.get('clientOrderId') if tp_order and tp_order.get('id') else None,
-                    'current_tp_price': final_tp_price if tp_order and tp_order.get('id') else None # 고정 TP 가격 저장
+                    'current_tp_price': final_tp_price if tp_order and tp_order.get('id') else None 
                 }
                 op_logger.info(f"[{symbol_ws}] <<< Entry successful and position state stored. Active Positions: {len(real_positions)} >>>")
-                # 3분봉 구독 시작
                 subscribe_to_3m_kline(symbol_ws, sym_ccxt)
 
             else: raise Exception("Max positions reached during final state storage")
@@ -1128,7 +1080,7 @@ def _execute_entry_strategy(symbol_ws, sym_ccxt, tgt_side, entry_px, tp_tgt, now
 
 
 def process_kline_message_main_tf(symbol_ws, kline_data):
-    """K-line 웹소켓 메시지를 처리하여 지표 계산, 진입 조건 확인 및 실행 (TP 업데이트 로직 제거)"""
+    """K-line 웹소켓 메시지를 처리하여 지표 계산, 진입 조건 확인 및 실행"""
     global real_positions, entry_in_progress
 
     if not update_historical_data(symbol_ws, kline_data, historical_data, data_lock, MAX_CANDLE_HISTORY): return
@@ -1152,7 +1104,6 @@ def process_kline_message_main_tf(symbol_ws, kline_data):
     now = datetime.now(UTC)
     sym_ccxt = convert_symbol_to_ccxt(symbol_ws)
 
-    # --- 신규 진입 로직 (캔들 마감 시에만 실행) ---
     if is_closed:
         with entry_lock: is_entry_attempted = entry_in_progress.get(symbol_ws, False)
         with real_positions_lock: position_exists = symbol_ws in real_positions
@@ -1165,8 +1116,8 @@ def process_kline_message_main_tf(symbol_ws, kline_data):
             tgt_side, tp_tgt, entry_px = _check_entry_conditions_main_tf(symbol_ws, idf)
 
             if tgt_side and tp_tgt is not None and tp_tgt > 0 and entry_px > 0:
-                # 새로운 3분봉 캔들 조건 확인
-                if _check_3m_candle_condition(symbol_ws, sym_ccxt, tgt_side):
+                # 3분봉 MACD 히스토그램 조건 확인 (함수명 변경 및 로직 수정됨)
+                if _check_3m_macd_histogram_condition(symbol_ws, sym_ccxt, tgt_side):
                     _execute_entry_strategy(symbol_ws, sym_ccxt, tgt_side, entry_px, tp_tgt, now)
             elif tgt_side:
                 op_logger.warning(f"[{symbol_ws}] Entry condition met for {tgt_side.upper()} but TP target is invalid (TP:{tp_tgt}, EntryPx:{entry_px}). Skipping entry.")
@@ -1175,25 +1126,22 @@ def process_kline_message_3m_tf(symbol_ws, kline_data):
     """3분봉 K-line 메시지를 처리하여 MACD 반대 신호 시 포지션 종료"""
     global real_positions, total_trades
 
-    # 3분봉 구독 중인 심볼인지 확인
     with subscribed_symbols_3m_lock:
         if symbol_ws not in subscribed_symbols_3m:
-            # op_logger.debug(f"[{symbol_ws}] Received 3m kline but not subscribed. Skipping.")
             return
 
-    if not update_historical_data(symbol_ws, kline_data, historical_data_3m, data_3m_lock, MAX_CANDLE_HISTORY): # MAX_CANDLE_HISTORY_3M 대신 MAX_CANDLE_HISTORY 사용
+    if not update_historical_data(symbol_ws, kline_data, historical_data_3m, data_3m_lock, MAX_CANDLE_HISTORY): 
         return
     
     is_closed_3m = kline_data.get('x', False)
-    if not is_closed_3m: # 3분봉은 마감 시에만 확인
+    if not is_closed_3m: 
         return
 
     with data_3m_lock:
         df_3m = historical_data_3m.get(symbol_ws)
     if df_3m is None: return
 
-    # 3분봉 데이터에 대해 지표 계산 (MACD만 필요)
-    idf_3m = calculate_indicators(df_3m.copy()) # BBands, StochRSI도 계산되지만 MACD만 사용
+    idf_3m = calculate_indicators(df_3m.copy()) 
     if idf_3m is None or idf_3m.empty or len(idf_3m) < 2: return
 
     try:
@@ -1212,7 +1160,7 @@ def process_kline_message_3m_tf(symbol_ws, kline_data):
 
     with real_positions_lock:
         pos_info = real_positions.get(symbol_ws)
-    if not pos_info: return # 포지션 없으면 처리 안함
+    if not pos_info: return 
 
     sym_ccxt = convert_symbol_to_ccxt(symbol_ws)
     exit_signal = False
@@ -1223,10 +1171,9 @@ def process_kline_message_3m_tf(symbol_ws, kline_data):
 
     if exit_signal:
         op_logger.info(f"[{symbol_ws}] Closing position due to 3m MACD opposite signal. SL/TP orders will be cancelled.")
-        # SL/TP 주문 취소 시도 (비동기)
         Thread(target=cancel_order, args=(sym_ccxt,), kwargs={'order_id': pos_info.get('sl_order_id'), 'client_order_id': pos_info.get('sl_client_order_id')}, daemon=True).start()
         Thread(target=cancel_order, args=(sym_ccxt,), kwargs={'order_id': pos_info.get('tp_order_id'), 'client_order_id': pos_info.get('tp_client_order_id')}, daemon=True).start()
-        time.sleep(0.2) # 주문 취소 시간 확보
+        time.sleep(0.2) 
 
         close_side = 'sell' if pos_info['side'] == 'long' else 'buy'
         close_order = place_market_order_real(sym_ccxt, close_side, pos_info['amount'], current_price_3m)
@@ -1236,7 +1183,7 @@ def process_kline_message_3m_tf(symbol_ws, kline_data):
             with real_positions_lock: real_positions.pop(symbol_ws, None)
             with stats_lock: total_trades += 1
             trade_logger.info(f"3M_MACD_EXIT: {close_side.upper()} {sym_ccxt}, Amount: {pos_info['amount']:.8f}, ApproxPrice: {current_price_3m:.5f}, CloseOrdID: {close_order['id']}")
-            unsubscribe_from_3m_kline(symbol_ws) # 3분봉 구독 해제
+            unsubscribe_from_3m_kline(symbol_ws) 
         else:
             op_logger.error(f"[{symbol_ws}] FAILED to close position by 3m MACD signal. Manual check required!")
 
@@ -1251,19 +1198,18 @@ def on_message_kline(wsapp, message):
         if 'stream' in data and 'data' in data:
             stream_name = data['stream']
             payload = data['data']
-            if payload.get('e') == 'kline': # K-line 이벤트인지 확인
-                symbol_upper = stream_name.split('@')[0].upper() # 심볼 추출 (대문자)
-                tf_from_stream = stream_name.split('_')[-1] # 스트림에서 타임프레임 추출
-                if tf_from_stream == TIMEFRAME: # 메인 타임프레임 (15m)
+            if payload.get('e') == 'kline': 
+                symbol_upper = stream_name.split('@')[0].upper() 
+                tf_from_stream = stream_name.split('_')[-1] 
+                if tf_from_stream == TIMEFRAME: 
                     process_kline_message_main_tf(symbol_upper, payload['k'])
-                elif tf_from_stream == TIMEFRAME_3M: # 3분봉 타임프레임
+                elif tf_from_stream == TIMEFRAME_3M: 
                     process_kline_message_3m_tf(symbol_upper, payload['k'])
 
         elif 'result' in data and data.get('id'):
             op_logger.info(f"K-line WebSocket subscription response: {data}")
         elif 'e' in data and data['e'] == 'error':
              op_logger.error(f"K-line WebSocket API Error received: {data}")
-        # else: op_logger.debug(f"Received unknown K-line WS message format: {message[:100]}") # 디버그용
 
     except json.JSONDecodeError:
         op_logger.error(f"K-line WebSocket JSON Decode Error: {message[:100]}")
@@ -1311,8 +1257,6 @@ def subscribe_to_3m_kline(symbol_ws, symbol_ccxt):
             op_logger.info(f"[{symbol_ws}] Already subscribed to 3m K-line.")
             return
 
-    # 초기 3분봉 데이터 로드
-    # MACD 계산에 필요한 최소 캔들 수 + 여유분
     fetch_limit_3m = MACD_SLOW_PERIOD + MACD_SIGNAL_PERIOD + 50
     df_3m = fetch_initial_ohlcv(symbol_ccxt, timeframe=TIMEFRAME_3M, limit=fetch_limit_3m, for_3m_chart=True)
     if df_3m is not None and not df_3m.empty:
@@ -1341,7 +1285,6 @@ def unsubscribe_from_3m_kline(symbol_ws):
     op_logger.info(f"[{symbol_ws}] Attempting to unsubscribe from 3m K-line.")
     with subscribed_symbols_3m_lock:
         if symbol_ws not in subscribed_symbols_3m:
-            # op_logger.info(f"[{symbol_ws}] Not currently subscribed to 3m K-line.")
             return
 
     if kline_wsapp and kline_wsapp.sock and kline_wsapp.sock.connected:
@@ -1359,7 +1302,7 @@ def unsubscribe_from_3m_kline(symbol_ws):
 
 def _fetch_initial_data_for_subscribed_symbols(symbols_to_fetch_ws):
     """구독된 심볼들(메인 타임프레임)에 대한 초기 과거 데이터를 로드"""
-    global shutdown_requested, historical_data # kline_wsapp은 여기서 직접 사용 안함
+    global shutdown_requested, historical_data 
     if not symbols_to_fetch_ws:
         op_logger.warning("No symbols provided to fetch initial data for.")
         return
@@ -1371,7 +1314,7 @@ def _fetch_initial_data_for_subscribed_symbols(symbols_to_fetch_ws):
     for symbol_ws in symbols_to_fetch_ws:
         if shutdown_requested: break
         sym_ccxt = convert_symbol_to_ccxt(symbol_ws)
-        df = fetch_initial_ohlcv(sym_ccxt, TIMEFRAME) # limit은 fetch_initial_ohlcv 내부에서 결정
+        df = fetch_initial_ohlcv(sym_ccxt, TIMEFRAME) 
         if df is not None and not df.empty:
             with data_lock:
                 historical_data[symbol_ws] = df
@@ -1395,14 +1338,12 @@ def on_open_kline_initial(wsapp):
         shutdown_requested = True; wsapp.close(); return
     initial_sym_ws = {convert_symbol_to_ws(s) for s in initial_sym_ccxt}
 
-    # 메인 타임프레임 스트림 구독
     if not _subscribe_kline_streams(wsapp, initial_sym_ws, TIMEFRAME):
         op_logger.error("Failed to subscribe to initial K-line streams. Shutting down.");
         shutdown_requested = True; wsapp.close(); return
 
     with subscribed_symbols_lock: subscribed_symbols = initial_sym_ws.copy()
 
-    # 초기 과거 데이터 로드 (메인 타임프레임)
     _fetch_initial_data_for_subscribed_symbols(initial_sym_ws)
     print("-" * 80 + f"\nK-line WebSocket connected ({TIMEFRAME}). Bot is now listening for market data...\n" + "-" * 80)
 
@@ -1412,17 +1353,15 @@ def on_open_kline_reconnect(wsapp):
     kline_websocket_running = True
     op_logger.info("K-line WebSocket RECONNECTED successfully.")
     
-    # 메인 타임프레임 재구독
     with subscribed_symbols_lock:
         current_subs = subscribed_symbols.copy()
     if not current_subs:
         op_logger.warning("Main timeframe subscription list is empty on reconnect.")
     else:
         op_logger.info(f"Resubscribing to {len(current_subs)} main timeframe K-line streams...")
-        if not _subscribe_kline_streams(wsapp, current_subs, TIMEFRAME): # 메인 타임프레임 스트림 재구독
+        if not _subscribe_kline_streams(wsapp, current_subs, TIMEFRAME): 
             op_logger.error("Failed to resubscribe to main K-line streams. Closing connection to retry.")
-            wsapp.close(); return # 재구독 실패 시 연결 종료하여 재시도 유도
-    # 3분봉 스트림 재구 구독 (활성 포지션이 있다면)
+            wsapp.close(); return 
     with subscribed_symbols_3m_lock: current_subs_3m = subscribed_symbols_3m.copy()
     if current_subs_3m:
         op_logger.info(f"Resubscribing to {len(current_subs_3m)} active 3m K-line streams...")
@@ -1439,7 +1378,6 @@ if __name__ == "__main__":
     start_time_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S %Z")
     op_logger.info(f"Bot starting at: {start_time_str}")
 
-    # 설정값 검증
     if SIMULATION_MODE:
         op_logger.error("SIMULATION_MODE is True. Set to False for real trading. Exiting.")
         exit()
@@ -1447,57 +1385,46 @@ if __name__ == "__main__":
         op_logger.error("API Key or Secret is not set or using placeholder values. Please configure them. Exiting.")
         exit()
 
-    # 실제 거래 모드 경고
     op_logger.warning("="*30 + f" REAL TRADING MODE - {log_prefix} " + "="*30)
-    op_logger.warning("Strategy: 15m MACD Cross (Price vs BBM) Entry + 3m MACD Slope Filter / Fixed TP (0.8%) / Fixed SL / 3m MACD Opposite Signal Exit")
+    op_logger.warning("Strategy: 15m MACD Cross (Price vs BBM) Entry + 3m MACD Histogram Filter / Fixed TP (0.8%) / Fixed SL / 3m MACD Opposite Signal Exit") # 전략 설명 업데이트
     op_logger.warning(f"Key Settings: MACD({MACD_FAST_PERIOD},{MACD_SLOW_PERIOD},{MACD_SIGNAL_PERIOD}), BBands({BBANDS_PERIOD},{BBANDS_STDDEV})")
-    # op_logger.warning(f"Key Settings: StochRSI({STOCHRSI_LENGTH},{STOCHRSI_RSI_LENGTH},{STOCHRSI_K},{STOCHRSI_D}), OS Level={STOCHRSI_OVERSOLD}, OB Level={STOCHRSI_OVERBOUGHT}") # StochRSI는 진입에 직접 사용 안함
     op_logger.warning(f"             Main TF: {TIMEFRAME}, Exit Monitor TF: {TIMEFRAME_3M}")
     op_logger.warning(f"             MaxPos={MAX_OPEN_POSITIONS}, Leverage={LEVERAGE}x, Timeframe={TIMEFRAME}, SL={1-LONG_STOP_LOSS_FACTOR:.2%}/{SHORT_STOP_LOSS_FACTOR-1:.2%}")
     op_logger.warning(f"             SymbolUpdateInterval={SYMBOL_UPDATE_INTERVAL_HOURS}h, RESTSyncInterval={REST_SYNC_INTERVAL_MINUTES}min")
     op_logger.warning("!!! THIS BOT WILL USE REAL FUNDS - MONITOR CLOSELY !!!")
     op_logger.warning("="*80)
-    # 시작 전 카운트다운
     for i in range(3, 0, -1):
         print(f"Starting in {i}...", end='\r')
         time.sleep(1)
-    print("Starting now!          ") # 이전 메시지 덮어쓰기
+    print("Starting now!          ") 
 
-    # 1. CCXT REST API 초기화
     if not initialize_binance_rest():
         op_logger.error("Exiting due to CCXT REST initialization failure.")
         exit()
 
-    # 2. 초기 상태 동기화 실행
     op_logger.info("Running initial REST state synchronization...")
     sync_positions_with_exchange()
     op_logger.info("Initial REST sync complete.")
-    log_asset_status() # 초기 자산 상태 로깅
+    log_asset_status() 
 
-    # 3. REST 동기화 스레드 시작
     sync_thread = Thread(target=sync_state_periodically, args=(REST_SYNC_INTERVAL_MINUTES * 60,), daemon=True)
     sync_thread.start()
 
-    # K-line 웹소켓 URL
     ws_url_kline = f"wss://fstream.binance.com/stream"
-    reconnect_delay = 5 # 초기 재연결 시도 간격(초)
+    reconnect_delay = 5 
 
     try:
-        # 메인 루프: 웹소켓 연결 관리 및 유지
-        while not shutdown_requested: # 종료 요청 없을 시 반복
-            if not kline_websocket_running: # K-line 웹소켓 연결이 끊겼거나 시작 전이면
+        while not shutdown_requested: 
+            if not kline_websocket_running: 
                 op_logger.info("Attempting K-line WebSocket connection/reconnection...")
-                # 기존 웹소켓 객체 정리 (재연결 시)
                 if kline_wsapp and kline_wsapp.sock:
                     try:
                         kline_wsapp.close()
-                        time.sleep(1) # 종료 시간 확보
+                        time.sleep(1) 
                     except Exception as close_e:
                          op_logger.warning(f"Error closing previous WebSocket connection: {close_e}")
 
-                # 연결 시 사용할 on_open 콜백 함수 결정 (최초 vs 재연결)
                 current_on_open = on_open_kline_initial if kline_thread is None else on_open_kline_reconnect
-                # 새 웹소켓 앱 객체 생성
                 kline_wsapp = websocket.WebSocketApp(
                     ws_url_kline,
                     on_open=current_on_open,
@@ -1506,84 +1433,72 @@ if __name__ == "__main__":
                     on_close=on_close_kline
                 )
 
-                # 웹소켓 실행 스레드 시작 (최초 또는 재시작)
                 if kline_thread is None or not kline_thread.is_alive():
-                    kline_thread = Thread(target=lambda: kline_wsapp.run_forever(ping_interval=60, ping_timeout=10), daemon=True)
+                    kline_thread = Thread(target=lambda: kline_wsapp.run_forever(ping_interval=0, ping_timeout=10), daemon=True) 
                     kline_thread.start()
                     op_logger.info("New K-line WebSocket thread started. Waiting for connection...")
                 else:
-                    # 이론상 이전 스레드가 종료되어야 하지만, 혹시 살아있으면 경고
                     op_logger.warning("K-line WebSocket thread seems to be still alive during reconnect attempt? This might indicate an issue.")
-                    # 필요시 강제 종료 로직 추가?
 
-                # 심볼 업데이트 스레드 시작 (최초 또는 재시작)
                 if symbol_update_thread is None or not symbol_update_thread.is_alive():
                     symbol_update_thread = Thread(target=update_top_symbols_periodically, args=(SYMBOL_UPDATE_INTERVAL_HOURS * 60 * 60,), daemon=True)
                     symbol_update_thread.start()
                     op_logger.info("Symbol Update thread started/restarted.")
 
-                # 연결 완료 대기 (최대 15초)
                 connect_wait_start = time.time()
                 while not kline_websocket_running and time.time() - connect_wait_start < 15:
-                    if shutdown_requested: break # 종료 요청 시 대기 중단
+                    if shutdown_requested: break 
                     time.sleep(0.5)
 
-                if kline_websocket_running: # 연결 성공 시
+                if kline_websocket_running: 
                     op_logger.info("K-line WebSocket connection established/re-established successfully.")
-                    reconnect_delay = 5 # 재연결 지연 시간 초기화
-                else: # 연결 실패 시
+                    reconnect_delay = 5 
+                else: 
                     op_logger.error(f"K-line WebSocket connection failed after waiting. Retrying in {reconnect_delay} seconds...")
-                    if kline_wsapp and kline_wsapp.sock: # 실패 시 웹소켓 객체 다시 닫기
+                    if kline_wsapp and kline_wsapp.sock: 
                         kline_wsapp.close()
                     time.sleep(reconnect_delay)
-                    reconnect_delay = min(reconnect_delay * 2, 60) # 재연결 지연 시간 증가 (최대 60초)
+                    reconnect_delay = min(reconnect_delay * 2, 60) 
 
-            else: # K-line 웹소켓 정상 실행 중
-                log_asset_status() # 주기적 자산 로깅
-                time.sleep(1) # 메인 루프 잠시 대기
+            else: 
+                log_asset_status() 
+                time.sleep(1) 
 
-    except KeyboardInterrupt: # Ctrl+C 입력 시
+    except KeyboardInterrupt: 
         op_logger.info("Keyboard interrupt received. Initiating graceful shutdown...")
-        shutdown_requested = True # 종료 플래그 설정
-    except Exception as main_loop_err: # 메인 루프에서 예상치 못한 오류 발생 시
+        shutdown_requested = True 
+    except Exception as main_loop_err: 
         op_logger.error(f"Critical error in main loop: {main_loop_err}", exc_info=True)
-        shutdown_requested = True # 종료 플래그 설정
+        shutdown_requested = True 
     finally:
-        # --- 최종 종료 처리 ---
         op_logger.info("Initiating final shutdown sequence...")
-        shutdown_requested = True # 모든 스레드에 종료 신호 확실히 전달
-        kline_websocket_running = False # 웹소켓 상태 플래그 변경
+        shutdown_requested = True 
+        kline_websocket_running = False 
 
-        # 웹소켓 연결 종료 시도
         if kline_wsapp and kline_wsapp.sock:
             op_logger.info("Closing K-line WebSocket connection...")
             kline_wsapp.close()
         
-        # 3분봉 구독 심볼이 있다면 모두 구독 해제 시도 (메인 웹소켓이 닫히면 자동으로 해제될 수 있지만 명시적 시도)
         with subscribed_symbols_3m_lock:
             active_3m_subs = list(subscribed_symbols_3m)
         if active_3m_subs:
             op_logger.info(f"Attempting to unsubscribe from {len(active_3m_subs)} active 3m streams...")
-            for sym_ws in active_3m_subs: unsubscribe_from_3m_kline(sym_ws) # unsubscribe_from_3m_kline 내부에서 wsapp 상태 체크
+            for sym_ws in active_3m_subs: unsubscribe_from_3m_kline(sym_ws) 
 
         op_logger.info("Waiting for background threads to finish (max 5 seconds)...")
-        time.sleep(5) # 필요시 시간 조정
+        time.sleep(5) 
 
-        # 모든 미체결 주문 취소 시도 (매우 중요)
         op_logger.warning("Attempting to cancel ALL remaining open orders across all USDT futures markets...")
         all_cancelled_final = True
         try:
-            if binance_rest: # REST API 객체 유효한지 확인
-                # 모든 선물 마켓 정보 가져오기
+            if binance_rest: 
                 markets = binance_rest.fetch_markets()
                 usdt_futures_symbols = [mkt['symbol'] for mkt in markets if mkt.get('type') == 'future' and mkt.get('quote') == TARGET_ASSET]
                 op_logger.info(f"Checking for open orders in {len(usdt_futures_symbols)} USDT futures markets...")
-                # 각 마켓별로 미체결 주문 취소 함수 호출
                 for symbol_ccxt in usdt_futures_symbols:
                     if not cancel_open_orders_for_symbol(symbol_ccxt):
                         op_logger.error(f"Failed to cancel orders for {symbol_ccxt} during final cleanup.")
-                        # 취소 실패 시에도 계속 진행
-                    time.sleep(0.3) # API 호출 간 지연
+                    time.sleep(0.3) 
             else:
                  op_logger.error("CCXT REST instance is not available for final order cancellation.")
                  all_cancelled_final = False
@@ -1597,16 +1512,15 @@ if __name__ == "__main__":
         else:
             op_logger.error("Potential issues during final order cancellation. MANUAL CHECK OF OPEN ORDERS IS STRONGLY ADVISED on Binance.")
 
-        # 최종 자산 상태 로깅
         op_logger.info("Fetching final balance...")
         final_balance = get_current_balance()
         bal_str = f"{final_balance:.2f}" if final_balance is not None else "Error"
-        with stats_lock: # 최종 통계 가져오기
+        with stats_lock: 
             trades, wins = total_trades, winning_trades
             wr = (wins / trades * 100) if trades > 0 else 0.0
         final_msg = f"Final Balance:{bal_str} {TARGET_ASSET}, Total Trades:{trades}(Delayed), Winning Trades:{wins}(Delayed), Win Rate:{wr:.2f}%"
         op_logger.info(final_msg)
-        asset_logger.info(final_msg) # 자산 로그에도 기록
+        asset_logger.info(final_msg) 
 
         op_logger.info(f"{log_prefix} Bot shutdown complete.")
         print(f"{log_prefix} Bot shutdown complete.")
