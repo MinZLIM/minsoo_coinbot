@@ -907,21 +907,21 @@ def _check_macd_bb_entry_conditions(symbol_ws, idf):
     tp_tgt = None
     entry_px = current_price
 
-    long_condition_bb = current_price < bb_low
+    long_condition_bb = current_price <= bb_low * 1.001 # BB Low 보다 낮거나, 0.1% 높은 가격까지 허용
     long_condition_macd_hist = current_macd_hist > prev_macd_hist
     
     if long_condition_bb and long_condition_macd_hist:
         tgt_side = 'buy'
         tp_tgt = bb_mid
-        op_logger.info(f"[{symbol_ws}] Long entry condition: Price ({current_price:.5f}) < BB_Low ({bb_low:.5f}) AND MACD_Hist ({current_macd_hist:.4f}) > Prev_MACD_Hist ({prev_macd_hist:.4f}). TP Target (BBM): {tp_tgt:.5f}.")
+        op_logger.info(f"[{symbol_ws}] Long entry condition: Price ({current_price:.5f}) <= BB_Low*1.001 ({bb_low * 1.001:.5f}, actual BB_Low: {bb_low:.5f}) AND MACD_Hist ({current_macd_hist:.4f}) > Prev_MACD_Hist ({prev_macd_hist:.4f}). TP Target (BBM): {tp_tgt:.5f}.")
     
-    short_condition_bb = current_price > bb_high
+    short_condition_bb = current_price >= bb_high * 0.999 # BB High 보다 높거나, 0.1% 낮은 가격까지 허용
     short_condition_macd_hist = current_macd_hist < prev_macd_hist
 
     if not tgt_side and short_condition_bb and short_condition_macd_hist:
         tgt_side = 'sell'
         tp_tgt = bb_mid
-        op_logger.info(f"[{symbol_ws}] Short entry condition: Price ({current_price:.5f}) > BB_High ({bb_high:.5f}) AND MACD_Hist ({current_macd_hist:.4f}) < Prev_MACD_Hist ({prev_macd_hist:.4f}). TP Target (BBM): {tp_tgt:.5f}.")
+        op_logger.info(f"[{symbol_ws}] Short entry condition: Price ({current_price:.5f}) >= BB_High*0.999 ({bb_high * 0.999:.5f}, actual BB_High: {bb_high:.5f}) AND MACD_Hist ({current_macd_hist:.4f}) < Prev_MACD_Hist ({prev_macd_hist:.4f}). TP Target (BBM): {tp_tgt:.5f}.")
 
     if tgt_side and tp_tgt is not None and tp_tgt > 0 and entry_px > 0:
         expected_profit_ratio = abs(tp_tgt - entry_px) / entry_px
