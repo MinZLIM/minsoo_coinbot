@@ -33,8 +33,8 @@ SIMULATION_MODE = False # 실제 거래 시 False로 설정
 LEVERAGE = 10 # 레버리지 설정
 MAX_OPEN_POSITIONS = 4 # 최대 동시 진입 포지션 수
 TOP_N_SYMBOLS = 100 # 거래량 상위 N개 심볼 선택
-TIMEFRAME = '15m' # 사용할 메인 캔들 시간봉
-TIMEFRAME_MINUTES = 15 # 메인 시간봉 분 단위
+TIMEFRAME = '2h' # 사용할 메인 캔들 시간봉
+TIMEFRAME_MINUTES = 120 # 메인 시간봉 분 단위
 
 # --- MACD 설정 ---
 MACD_FAST_PERIOD = 12
@@ -46,8 +46,8 @@ BBANDS_PERIOD = 20 # 볼린저 밴드 기간
 BBANDS_STDDEV = 2.0 # 볼린저 밴드 표준편차
 
 # --- SL 설정 ---
-LONG_STOP_LOSS_FACTOR = 0.99 # 롱 포지션 손절 비율 (진입가 * 0.99)
-SHORT_STOP_LOSS_FACTOR = 1.01 # 숏 포지션 손절 비율 (진입가 * 1.01)
+LONG_STOP_LOSS_FACTOR = 0.98 # 롱 포지션 손절 비율 (진입가 * 0.99)
+SHORT_STOP_LOSS_FACTOR = 1.02 # 숏 포지션 손절 비율 (진입가 * 1.01)
 
 # --- 기타 설정 ---
 REST_SYNC_INTERVAL_MINUTES = 5 # REST API 상태 동기화 주기(분)
@@ -55,10 +55,8 @@ SYMBOL_UPDATE_INTERVAL_HOURS = 2 # 거래 대상 심볼 목록 업데이트 주�
 API_RETRY_COUNT = 3 # API 호출 실패 시 재시도 횟수
 API_RETRY_DELAY_SECONDS = 2 # API 호출 재시도 간격(초)
 TARGET_ASSET = 'USDT' # 타겟 자산 (테더)
-TIMEFRAME_3M = '3m' # 포지션 모니터링용 3분봉
-TIMEFRAME_3M_MINUTES = 3 # 3분봉 분 단위
-TIMEFRAME_1M = '1m' # 포지션 진입 필터용 1분봉
-TIMEFRAME_1M_MINUTES = 1 # 1분봉 분 단위
+TIMEFRAME_3M = '15m' # 포지션 모니터링용 3분봉
+TIMEFRAME_3M_MINUTES = 15 # 3분봉 분 단위
 INITIAL_CANDLE_FETCH_LIMIT = 100 # 초기 캔들 데이터 로드 개수 (지표 계산 위해 충분히 확보)
 MAX_CANDLE_HISTORY = 200 # 메모리에 유지할 최대 캔들 개수 (메인/3분봉 공용)
 KST = ZoneInfo("Asia/Seoul") # 한국 시간대
@@ -70,7 +68,7 @@ pd.set_option('display.max_rows', None); pd.set_option('display.max_columns', No
 # ==============================================================================
 log_dir = os.path.dirname(os.path.abspath(__file__)) # 로그 파일 저장 디렉토리
 log_filename_base = "bot_log" # 로그 파일 기본 이름
-log_prefix = "[15m_MACD_BBM_TP0.8_1mEntryFilt_3mExit_V2.4]" # 로그 메시지 접두사 (전략 및 버전 명시)
+log_prefix = "[2h_MACD_BBM_TP0.8_15mExit_V2.5]" # 로그 메시지 접두사 (전략 및 버전 명시, 2h 메인 TF)
 
 # 운영 로그 (Operation Log)
 op_logger = logging.getLogger('operation')
@@ -916,92 +914,14 @@ def _check_entry_conditions_main_tf(symbol_ws, idf):
 
     if macd_golden_cross and entry_px < bbm:
         tgt_side = 'buy'
-        tp_tgt = entry_px * 1.008 # 고정 0.8% TP
+        tp_tgt = entry_px * 1.02 # 고정 0.8% TP
         op_logger.info(f"[{symbol_ws}] Long entry: MACD Golden Cross (L:{curr_macd_line:.4f}, S:{curr_macd_signal:.4f}) AND Price ({entry_px:.5f}) < BBM ({bbm:.5f}). TP: {tp_tgt:.5f}.")
     elif macd_dead_cross and entry_px > bbm:
         tgt_side = 'sell'
-        tp_tgt = entry_px * 0.992 # 고정 0.8% TP
+        tp_tgt = entry_px * 0.98 # 고정 0.8% TP
         op_logger.info(f"[{symbol_ws}] Short entry: MACD Dead Cross (L:{curr_macd_line:.4f}, S:{curr_macd_signal:.4f}) AND Price ({entry_px:.5f}) > BBM ({bbm:.5f}). TP: {tp_tgt:.5f}.")
 
     return tgt_side, tp_tgt, entry_px
-
-def _check_1m_candle_condition(symbol_ws, sym_ccxt, proposed_side):
-    """최근 3개의 1분봉을 확인하여 진입 조건 필터링"""
-    op_logger.debug(f"[{symbol_ws}] Checking 1m candle condition for {proposed_side} entry.")
-    
-    # Fetch last ~7 1-minute candles to ensure we have at least 3 closed candles
-    # fetch_ohlcv_data returns [timestamp, open, high, low, close, volume]
-    raw_ohlcv_1m = fetch_ohlcv_data(sym_ccxt, TIMEFRAME_1M, limit=7) 
-        
-    if not raw_ohlcv_1m or len(raw_ohlcv_1m) < 3:
-        op_logger.warning(f"[{symbol_ws}] Could not fetch sufficient 1m data (got {len(raw_ohlcv_1m) if raw_ohlcv_1m else 0} candles, need 3) for 1m candle condition. Aborting entry.")
-        return False
-
-    # Use the last 3 available candles from the fetched data
-    # Convert to DataFrame for easier handling
-    temp_df = pd.DataFrame(raw_ohlcv_1m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    # Ensure numeric types for open and close
-    temp_df['open'] = pd.to_numeric(temp_df['open'])
-    temp_df['close'] = pd.to_numeric(temp_df['close'])
-    
-    # Select the last 3 candles
-    # df_candles_to_check will have index 0, 1, 2 corresponding to oldest, middle, newest of the three.
-    df_candles_to_check = temp_df.iloc[-3:].reset_index(drop=True) 
-    
-    if len(df_candles_to_check) < 3:
-        op_logger.warning(f"[{symbol_ws}] Processed 1m data resulted in < 3 rows for check. Aborting entry.")
-        return False
-
-    try:
-        # df_candles_to_check의 인덱스 0, 1, 2는 각각 가장 오래된 봉, 중간 봉, 최신 봉에 해당합니다.
-        candle1_open = df_candles_to_check['open'].iloc[1]
-        candle1_close = df_candles_to_check['close'].iloc[1]
-        candle2_open  = df_candles_to_check['open'].iloc[2]
-        candle2_close = df_candles_to_check['close'].iloc[2]
-        candle3_open = df_candles_to_check['open'].iloc[3]
-        candle3_close = df_candles_to_check['close'].iloc[3]
-
-        # Log the candles being checked
-        op_logger.debug(f"[{symbol_ws}] 1m Candles for check: "
-                        f"C1(O:{candle1_open:.5f} C:{candle1_close:.5f}), "
-                        f"C2(O:{candle2_open:.5f} C:{candle2_close:.5f}), "
-                        f"C3(O:{candle3_open:.5f} C:{candle3_close:.5f})")
-
-        if proposed_side == 'buy':
-            # Long: None of the last three 1m candles should be bearish (close < open)
-            is_c1_bearish = candle1_close < candle1_open
-            is_c2_bearish = candle2_close < candle2_open
-            is_c3_bearish = candle3_close < candle3_open
-            print(candle1_open,candle1_close)
-            print(candle2_open,candle2_close)
-            print(candle3_open,candle3_close)
-            
-            if is_c1_bearish or is_c2_bearish or is_c3_bearish:
-                op_logger.info(f"[{symbol_ws}] Long entry aborted: Recent 1m candle(s) bearish. "
-                               f"C1_Bearish:{is_c1_bearish}, C2_Bearish:{is_c2_bearish}, C3_Bearish:{is_c3_bearish}.")
-                return False
-        elif proposed_side == 'short':
-            # Short: None of the last three 1m candles should be bullish (close > open)
-            is_c1_bullish = candle1_close > candle1_open
-            is_c2_bullish = candle2_close > candle2_open
-            is_c3_bullish = candle3_close > candle3_open
-            if is_c1_bullish or is_c2_bullish or is_c3_bullish:
-                op_logger.info(f"[{symbol_ws}] Short entry aborted: Recent 1m candle(s) bullish. "
-                               f"C1_Bullish:{is_c1_bullish}, C2_Bullish:{is_c2_bullish}, C3_Bullish:{is_c3_bullish}.")
-                return False
-        
-        op_logger.info(f"[{symbol_ws}] 1m candle condition PASSED for {proposed_side} entry.")
-        return True
-
-    except IndexError:
-        op_logger.warning(f"[{symbol_ws}] IndexError accessing 1m candle data from df_candles_to_check (Length: {len(df_candles_to_check)}). Aborting entry.")
-        return False
-    except KeyError as e:
-        op_logger.warning(f"[{symbol_ws}] KeyError accessing 1m candle data (missing column? {e}). Aborting entry. Columns: {df_candles_to_check.columns.tolist()}")
-        return False
-    except Exception as e:
-        op_logger.error(f"[{symbol_ws}] Unexpected error in _check_1m_candle_condition: {e}. Aborting entry.", exc_info=True)
-        return False
 
 def _perform_entry_order(symbol_ws, sym_ccxt, tgt_side, entry_px, tp_tgt, now):
     """실제 진입 주문 및 SL/TP 주문 설정, 로컬 상태 저장"""
@@ -1128,11 +1048,10 @@ def process_kline_message_main_tf(symbol_ws, kline_data):
             tgt_side, tp_tgt, entry_px = _check_entry_conditions_main_tf(symbol_ws, idf)
 
             if tgt_side and tp_tgt is not None and tp_tgt > 0 and entry_px > 0:
-                # 새로운 1분봉 캔들 조건 확인
-                if _check_1m_candle_condition(symbol_ws, sym_ccxt, tgt_side):
-                    _execute_entry_strategy(symbol_ws, sym_ccxt, tgt_side, entry_px, tp_tgt, now)
-            elif tgt_side:
-                op_logger.warning(f"[{symbol_ws}] Entry condition met for {tgt_side.upper()} but TP target is invalid (TP:{tp_tgt}, EntryPx:{entry_px}). Skipping entry.")
+                op_logger.info(f"[{symbol_ws}] Main TF entry conditions met for {tgt_side.upper()}. Proceeding to execute entry strategy (1m filter removed).")
+                _execute_entry_strategy(symbol_ws, sym_ccxt, tgt_side, entry_px, tp_tgt, now)
+            elif tgt_side: # 이 경우는 tgt_side는 있으나 tp_tgt 또는 entry_px가 유효하지 않은 경우
+                op_logger.warning(f"[{symbol_ws}] Main TF entry condition met for {tgt_side.upper()} but TP target or Entry Price is invalid (TP:{tp_tgt}, EntryPx:{entry_px}). Skipping entry.")
 
 def process_kline_message_3m_tf(symbol_ws, kline_data):
     """3분봉 K-line 메시지를 처리하여 MACD 반대 신호 시 포지션 종료"""
@@ -1412,7 +1331,7 @@ if __name__ == "__main__":
 
     # 실제 거래 모드 경고
     op_logger.warning("="*30 + f" REAL TRADING MODE - {log_prefix} " + "="*30)
-    op_logger.warning("Strategy: 15m MACD Cross (Price vs BBM) Entry + 1m 3-Candle Filter / Fixed TP (0.8%) / Fixed SL / 3m MACD Opposite Signal Exit")
+    op_logger.warning("Strategy: 2h MACD Cross (Price vs BBM) Entry / Fixed TP (0.8%) / Fixed SL / 15m MACD Opposite Signal Exit")
     op_logger.warning(f"Key Settings: MACD({MACD_FAST_PERIOD},{MACD_SLOW_PERIOD},{MACD_SIGNAL_PERIOD}), BBands({BBANDS_PERIOD},{BBANDS_STDDEV}), Leverage={LEVERAGE}x")
     op_logger.warning(f"             Main TF: {TIMEFRAME}, Exit Monitor TF: {TIMEFRAME_3M}")
     op_logger.warning(f"             MaxPos={MAX_OPEN_POSITIONS}, Leverage={LEVERAGE}x, Timeframe={TIMEFRAME}, SL={1-LONG_STOP_LOSS_FACTOR:.2%}/{SHORT_STOP_LOSS_FACTOR-1:.2%}")
