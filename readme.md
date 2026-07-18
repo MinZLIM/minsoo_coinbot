@@ -48,3 +48,5 @@ This project is an automatic trading program for cryptocurrency through the API 
 #### data : None
 ##### > Result : Including SW Process's Status is Running
 - 
+
+|: data | dsf | :|
