@@ -49,6 +49,6 @@ This project is an automatic trading program for cryptocurrency through the API 
 ##### > Result : Including SW Process's Status is Running
 - 
 
-| data | step |result|
+|Step|Data|Expect Result|
 |---|---|---|
-|fsdfe|sdf|w3212|
+|1.Excute Robot Vacuum SW |None|Including SW Process's Status is Running 
