@@ -33,9 +33,9 @@ This project is an automatic trading program for cryptocurrency through the API 
 
 ## Test Case2. Connect to App
 - Env : IOS/Android Device
+
 |Step|Data|Expect Result|
 |---|---|---|
 |1. Install Asigned App | None | App is Installed in Control Device |
 |2. Searching Robot | None | App Detect Robot |
 |3. Connect to Robot  | None | App showing Robot Status(Model, Charging, and so on) |
-
