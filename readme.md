@@ -29,23 +29,12 @@ This project is an automatic trading program for cryptocurrency through the API 
 # Test Scenarios : Init Setup & Cleaning Run
 
 ## Test Case1. Execute Robot Vacuum SW
-### step1 : Excute Robot Vacuum SW
-### data : None
-### Result : Including SW Process's Status is Running
+> step1 : Excute Robot Vacuum SW | data : None | Result : Including SW Process's Status is Running
 
 ## Test Case2. Connect to App
 - Env : IOS/Android Device
-> Step1 : Install Asigned App  ||   data : None  || Result: App is Installed in Control Device
-
-> Step2 : Searching Robot
-> data : None
-### Result : App Detect Robot 
-
-### Step3 : Searching Robot
-### data : None
-### Result : App Detect Robot 
-
-### Step4 : Connect to Robot
-### data : None
-### Result : App showing Robot Status(Model, Charging, and so on) 
+> Step1 : Install Asigned App | data : None | Result: App is Installed in Control Device
+> Step2 : Searching Robot | data : None | Result : App Detect Robot 
+> Step3 : Searching Robot | data : None |  Result : App Detect Robot 
+> Step4 : Connect to Robot | data : None | Result : App showing Robot Status(Model, Charging, and so on) 
 
