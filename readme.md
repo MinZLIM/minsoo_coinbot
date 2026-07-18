@@ -25,4 +25,14 @@ This project is an automatic trading program for cryptocurrency through the API 
  > Selling at market price when maintenance indicators are measurable <br />
 --- 
 
-- test 1
+
+# Test Scenarios : Init Setup & Cleaning Run
+
+## Test Case1. Booting Robot
+### step1 push power button
+### data : None
+### Result : 
+- Start Booting System
+- Robot Led show Battery,Equipment Status and so on
+
+
