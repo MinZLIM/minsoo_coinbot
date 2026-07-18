@@ -25,6 +25,7 @@ This project is an automatic trading program for cryptocurrency through the API 
  > Selling at market price when maintenance indicators are measurable <br />
 --- 
 
+# Test Scenarios : Init Setup & Cleaning Run
 
 ## Test Case1. Execute Robot Vacuum SW
 |Step|Data|Expect Result|
@@ -39,3 +40,14 @@ This project is an automatic trading program for cryptocurrency through the API 
 |1. Install Asigned App | None | App is Installed in Control Device |
 |2. Searching Robot | None | App Detect Robot |
 |3. Connect to Robot  | None | App showing Robot Status(Model, Charging, and so on) |
+
+## Test Case3. Config Settings
+|Step|Data|Expect Result|
+|---|---|---|
+|1. Select Language in App | Korea,Engilsh,Japanese...  | App's Language is Changed to selected Language|
+|2. Set Time | GST+ or NTP Set | Robot's Time is Applyed |
+
+## Test Case4. Make Map
+|Step|Data|Expect Result|
+|---|---|---|
+|1. Push Make Map Button| None | Robot is try to make Map | 
