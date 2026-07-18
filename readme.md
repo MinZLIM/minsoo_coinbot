@@ -24,3 +24,5 @@ This project is an automatic trading program for cryptocurrency through the API 
  > MaintenanceListLooping and component collection <br />
  > Selling at market price when maintenance indicators are measurable <br />
 --- 
+
+- test 1
