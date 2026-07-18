@@ -46,5 +46,5 @@ This project is an automatic trading program for cryptocurrency through the API 
 ## Test Case1. Execute Robot Vacuum SW
 ### step1 : Excute Robot Vacuum SW
 #### data : None
-##### Result : Including SW Process's Status is Running
+##### > Result : Including SW Process's Status is Running
 - 
